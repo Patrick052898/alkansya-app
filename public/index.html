@@ -1,0 +1,754 @@
+<!DOCTYPE html>
+<html lang="fil">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Alkansya</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,700&family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+  :root {
+    --paper: #F6EFDD;
+    --paper-raised: #FBF6EA;
+    --ink: #1F2E23;
+    --ink-soft: #5B6A5E;
+    --rule: #C9BBA0;
+    --income: #2F6B4F;
+    --expense: #A2452D;
+    --gold: #C98A2B;
+    --shadow: rgba(31, 46, 35, 0.12);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --paper: #17201A;
+      --paper-raised: #1D271F;
+      --ink: #EDE6D6;
+      --ink-soft: #9CA9A0;
+      --rule: #3B473D;
+      --income: #6FBE95;
+      --expense: #E0876A;
+      --gold: #E0B15C;
+      --shadow: rgba(0, 0, 0, 0.4);
+    }
+  }
+  :root[data-theme="dark"] {
+    --paper: #17201A;
+    --paper-raised: #1D271F;
+    --ink: #EDE6D6;
+    --ink-soft: #9CA9A0;
+    --rule: #3B473D;
+    --income: #6FBE95;
+    --expense: #E0876A;
+    --gold: #E0B15C;
+    --shadow: rgba(0, 0, 0, 0.4);
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: "IBM Plex Sans", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .num { font-family: "Space Grotesk", monospace; font-variant-numeric: tabular-nums; }
+  .serif { font-family: "Fraunces", serif; }
+  input, select, button { font-family: inherit; color: inherit; }
+  input:focus, select:focus, button:focus-visible {
+    outline: 2px solid var(--gold);
+    outline-offset: 1px;
+  }
+  ::placeholder { color: var(--ink-soft); opacity: 0.7; }
+
+  .wrap { max-width: 900px; margin: 0 auto; padding: 28px 20px 90px; }
+  .field { display: flex; flex-direction: column; gap: 5px; font-size: 12px; color: var(--ink-soft); }
+  .input {
+    padding: 10px 12px;
+    border: 1px solid var(--rule);
+    border-radius: 3px;
+    font-size: 14.5px;
+    background: var(--paper-raised);
+    color: var(--ink);
+    width: 100%;
+  }
+  .btn-primary {
+    background: var(--ink);
+    color: var(--paper);
+    border: none;
+    border-radius: 3px;
+    padding: 12px 16px;
+    font-size: 14.5px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .btn-primary:disabled { opacity: 0.6; cursor: default; }
+  .btn-ghost {
+    background: none;
+    border: 1px solid var(--rule);
+    border-radius: 3px;
+    padding: 7px 13px;
+    font-size: 12.5px;
+    color: var(--ink);
+    cursor: pointer;
+  }
+  .btn-icon { background: none; border: none; cursor: pointer; color: var(--ink-soft); padding: 4px; }
+  .section-label {
+    font-size: 13px; font-weight: 600; margin-bottom: 10px;
+    border-bottom: 1px solid var(--rule); padding-bottom: 6px;
+  }
+  .toast {
+    position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+    background: var(--ink); color: var(--paper); padding: 10px 18px;
+    border-radius: 4px; font-size: 13px; box-shadow: 0 8px 24px var(--shadow);
+    max-width: 90vw; text-align: center; z-index: 50;
+  }
+  .overflow-x { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+
+  /* auth screen */
+  .auth-shell { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 32px 16px; }
+  .auth-card { width: 100%; max-width: 420px; }
+  .tabs { display: flex; gap: 20px; margin-bottom: 20px; border-bottom: 1px solid var(--rule); }
+  .tab-btn {
+    background: none; border: none; cursor: pointer; padding: 8px 0 10px;
+    font-size: 14px; font-weight: 600; color: var(--ink-soft);
+    border-bottom: 2px solid transparent;
+  }
+  .tab-btn.active { color: var(--ink); border-bottom-color: var(--ink); }
+  .err { color: var(--expense); font-size: 13px; margin-bottom: 14px; }
+  .radio-row { display: flex; gap: 16px; margin-bottom: 10px; font-size: 13px; }
+  .radio-row label { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+  form { display: flex; flex-direction: column; gap: 14px; }
+
+  /* dashboard */
+  .top-bar {
+    display: flex; justify-content: space-between; align-items: flex-start;
+    flex-wrap: wrap; gap: 12px; border-bottom: 2px solid var(--ink);
+    padding-bottom: 16px; margin-bottom: 20px;
+  }
+  .code-chip {
+    font-size: 12px; letter-spacing: 0.04em; color: var(--gold);
+    border: 1px solid var(--gold); padding: 4px 10px; border-radius: 3px;
+  }
+  .month-nav { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+  .balance { text-align: center; margin: 10px 0 28px; }
+  .balance .amt { font-weight: 700; font-size: 44px; }
+  .ledger-grid {
+    display: grid; grid-template-columns: 1fr 1fr;
+    border: 1px solid var(--rule); margin-bottom: 28px;
+  }
+  .ledger-col { padding: 16px 18px; }
+  .ledger-col.left { border-right: 1px solid var(--rule); }
+  .ledger-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 10px; }
+  .entry-list { display: flex; flex-direction: column; gap: 8px; max-height: 260px; overflow-y: auto; }
+  .entry-row { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; font-size: 12.5px; border-bottom: 1px dotted var(--rule); padding-bottom: 6px; }
+  .entry-empty { font-size: 12px; color: var(--ink-soft); font-style: italic; }
+  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; padding: 6px 8px; font-size: 12px; color: var(--ink-soft); font-weight: 600; border-bottom: 1px solid var(--rule); }
+  td { padding: 8px 8px; border-bottom: 1px solid var(--rule); }
+  .disclaimer { margin-top: 22px; font-size: 12px; color: var(--ink-soft); line-height: 1.5; }
+  .budget-row { margin-bottom: 14px; }
+  .budget-row-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 4px; gap: 8px; }
+  .budget-bar-track { height: 6px; background: var(--rule); border-radius: 3px; overflow: hidden; }
+  .budget-bar-fill { height: 100%; border-radius: 3px; }
+  .budget-note { font-size: 11.5px; margin-top: 3px; }
+  .budget-hint { font-size: 12px; color: var(--ink-soft); margin: -4px 0 0; }
+
+  @media (max-width: 640px) {
+    .ledger-grid { grid-template-columns: 1fr !important; }
+    .ledger-col.left { border-right: none !important; border-bottom: 1px solid var(--rule); }
+    .two-col { grid-template-columns: 1fr !important; }
+    .balance .amt { font-size: 36px; }
+  }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script>
+(function () {
+  "use strict";
+
+  var MONTHS_FIL = ["Enero","Pebrero","Marso","Abril","Mayo","Hunyo","Hulyo","Agosto","Setyembre","Oktubre","Nobyembre","Disyembre"];
+  var INCOME_CATEGORIES = ["Suweldo","Negosyo","Padala","Iba pang Kita"];
+  var EXPENSE_CATEGORIES = ["Pagkain","Bahay/Renta","Kuryente","Tubig","Load/Internet","Pamasahe","Ipon","Utang","Edukasyon","Kalusugan","Libangan","Iba pa"];
+
+  var root = document.getElementById("root");
+  var profile = loadProfile(); // {householdCode, viewerId, displayName} | null
+  var household = null; // live doc data
+  var view = "loading"; // 'loading' | 'setup' | 'dashboard'
+  var authMode = "create"; // 'create' | 'join'
+  var authError = "";
+  var busy = false;
+  var toastMsg = "";
+  var toastTimer = null;
+
+  var now = new Date();
+  var activeYear = now.getFullYear();
+  var activeMonthIdx = now.getMonth();
+  var entryType = "expense";
+  var entryCategory = EXPENSE_CATEGORIES[0];
+
+  function peso(n) {
+    var num = Number(n) || 0;
+    return "\u20B1" + num.toLocaleString("en-PH", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  }
+  function todayISO() { return new Date().toISOString().slice(0, 10); }
+  function monthKey(y, m) { return y + "-" + String(m + 1).padStart(2, "0"); }
+  function currentMonthBudgets() {
+    var mk = monthKey(activeYear, activeMonthIdx);
+    return (household.budgets && household.budgets[mk]) || {};
+  }
+  function esc(s) {
+    return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+    });
+  }
+  function uid() { return Math.random().toString(36).slice(2, 10) + Date.now().toString(36); }
+
+  function loadProfile() {
+    try {
+      var raw = localStorage.getItem("alkansya_profile");
+      return raw ? JSON.parse(raw) : null;
+    } catch (e) { return null; }
+  }
+  function saveProfile(p) {
+    profile = p;
+    try { localStorage.setItem("alkansya_profile", JSON.stringify(p)); } catch (e) {}
+  }
+  function clearProfile() {
+    profile = null;
+    try { localStorage.removeItem("alkansya_profile"); } catch (e) {}
+  }
+
+  function showToast(msg) {
+    toastMsg = msg;
+    render();
+    if (toastTimer) clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { toastMsg = ""; render(); }, 2800);
+  }
+
+  function genCode(name) {
+    var base = (name || "PAM").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 4);
+    while (base.length < 4) base += "X";
+    var rand = Math.floor(100 + Math.random() * 900);
+    return base + "-" + rand;
+  }
+
+  var pollTimer = null;
+  var API = "/api";
+
+  async function apiCall(path, opts) {
+    var res = await fetch(API + path, Object.assign({
+      headers: { "Content-Type": "application/json" }
+    }, opts || {}));
+    var body = null;
+    try { body = await res.json(); } catch (e) {}
+    if (!res.ok) {
+      var msg = (body && body.error) || ("HTTP " + res.status);
+      throw new Error(msg);
+    }
+    return body;
+  }
+
+  async function initDb() {
+    if (profile && profile.householdCode) {
+      subscribeHousehold(profile.householdCode);
+    } else {
+      view = "setup";
+      render();
+    }
+  }
+
+  function subscribeHousehold(code) {
+    view = "loading";
+    render();
+    stopPolling();
+    loadHouseholdOnce(code);
+    pollTimer = setInterval(function () { loadHouseholdOnce(code, true); }, 4000);
+  }
+
+  function stopPolling() {
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  }
+
+  async function loadHouseholdOnce(code, silent) {
+    try {
+      var body = await apiCall("/households/" + encodeURIComponent(code));
+      household = body.household;
+      household.__code = code;
+      view = "dashboard";
+      render();
+    } catch (e) {
+      if (!silent) {
+        household = null;
+        view = "missing-household";
+        render();
+      }
+    }
+  }
+
+  async function handleCreate(name, displayName) {
+    authError = "";
+    if (!name.trim()) { authError = "Pangalanan ang inyong sambahayan."; render(); return; }
+    if (!displayName.trim()) { authError = "Ilagay ang inyong pangalan."; render(); return; }
+    busy = true; render();
+    try {
+      var body = await apiCall("/households", {
+        method: "POST",
+        body: JSON.stringify({ householdName: name.trim(), displayName: displayName.trim() })
+      });
+      saveProfile({ householdCode: body.code, viewerId: body.viewerId, displayName: displayName.trim() });
+      busy = false;
+      subscribeHousehold(body.code);
+      showToast("Nagawa ang sambahayan!");
+    } catch (e) {
+      busy = false;
+      authError = "Nagka-problema sa paggawa. Subukan ulit.";
+      render();
+    }
+  }
+
+  async function handleJoin(codeInput, displayName) {
+    authError = "";
+    var code = codeInput.trim().toUpperCase();
+    if (!code) { authError = "Ilagay ang code ng sambahayan."; render(); return; }
+    if (!displayName.trim()) { authError = "Ilagay ang inyong pangalan."; render(); return; }
+    busy = true; render();
+    try {
+      var body = await apiCall("/households/" + encodeURIComponent(code) + "/join", {
+        method: "POST",
+        body: JSON.stringify({ displayName: displayName.trim() })
+      });
+      saveProfile({ householdCode: code, viewerId: body.viewerId, displayName: displayName.trim() });
+      busy = false;
+      subscribeHousehold(code);
+      showToast("Sumali sa " + body.household.name + "!");
+    } catch (e) {
+      busy = false;
+      authError = e.message === "not_found"
+        ? 'Walang sambahayang natagpuan sa code na "' + esc(code) + '".'
+        : "Nagka-problema sa pagsali. Subukan ulit.";
+      render();
+    }
+  }
+
+  function handleLogout() {
+    stopPolling();
+    clearProfile();
+    household = null;
+    view = "setup";
+    render();
+  }
+
+  async function patchHousehold(fields) {
+    var body = await apiCall("/households/" + encodeURIComponent(profile.householdCode), {
+      method: "PATCH",
+      body: JSON.stringify(fields)
+    });
+    household = body.household;
+    household.__code = profile.householdCode;
+  }
+
+  async function addEntry(amount, note, date) {
+    var amt = parseFloat(amount);
+    if (!amt || amt <= 0) { showToast("Ilagay ang wastong halaga."); return; }
+    var entry = {
+      id: uid(),
+      viewerId: profile.viewerId,
+      displayName: profile.displayName,
+      type: entryType,
+      category: entryCategory,
+      amount: amt,
+      note: (note || "").trim(),
+      date: date || todayISO(),
+    };
+    var entries = [entry].concat(household.entries || []);
+    try {
+      await patchHousehold({ entries: entries });
+      render();
+      showToast(entryType === "income" ? "Naidagdag ang kita." : "Naidagdag ang gasto.");
+    } catch (e) {
+      showToast("Hindi na-save — subukan ulit.");
+    }
+  }
+
+  async function deleteEntry(id, ownerViewerId) {
+    if (ownerViewerId !== profile.viewerId) return;
+    if (!window.confirm("Tanggalin ang talang ito?")) return;
+    var entries = (household.entries || []).filter(function (en) { return en.id !== id; });
+    try {
+      await patchHousehold({ entries: entries });
+      render();
+      showToast("Tinanggal ang tala.");
+    } catch (e) {
+      showToast("Hindi na-tanggal — subukan ulit.");
+    }
+  }
+
+  async function setBudget(category, amountStr) {
+    var amt = parseFloat(amountStr);
+    if (!category) { showToast("Pumili ng kategorya."); return; }
+    if (!amt || amt <= 0) { showToast("Ilagay ang wastong halaga."); return; }
+    var mk = monthKey(activeYear, activeMonthIdx);
+    var budgets = Object.assign({}, household.budgets || {});
+    budgets[mk] = Object.assign({}, budgets[mk] || {});
+    budgets[mk][category] = amt;
+    try {
+      await patchHousehold({ budgets: budgets });
+      render();
+      showToast("Na-set ang budget para sa " + category + ".");
+    } catch (e) {
+      showToast("Hindi na-save ang budget — subukan ulit.");
+    }
+  }
+
+  async function removeBudget(category) {
+    var mk = monthKey(activeYear, activeMonthIdx);
+    var budgets = Object.assign({}, household.budgets || {});
+    if (budgets[mk] && Object.prototype.hasOwnProperty.call(budgets[mk], category)) {
+      var monthBudgets = Object.assign({}, budgets[mk]);
+      delete monthBudgets[category];
+      budgets[mk] = monthBudgets;
+      try {
+        await patchHousehold({ budgets: budgets });
+        render();
+        showToast("Tinanggal ang budget.");
+      } catch (e) {
+        showToast("Hindi na-tanggal — subukan ulit.");
+      }
+    }
+  }
+
+  function shiftMonth(delta) {
+    var m = activeMonthIdx + delta, y = activeYear;
+    if (m < 0) { m = 11; y -= 1; }
+    if (m > 11) { m = 0; y += 1; }
+    activeMonthIdx = m; activeYear = y;
+    render();
+  }
+
+  function computeMonthData() {
+    var entries = (household && household.entries) || [];
+    var monthEntries = entries.filter(function (en) {
+      var d = new Date(en.date + "T00:00:00");
+      return d.getFullYear() === activeYear && d.getMonth() === activeMonthIdx;
+    });
+    var income = 0, expense = 0;
+    monthEntries.forEach(function (en) {
+      if (en.type === "income") income += en.amount; else expense += en.amount;
+    });
+    var catMap = {};
+    monthEntries.filter(function (en) { return en.type === "expense"; }).forEach(function (en) {
+      catMap[en.category] = (catMap[en.category] || 0) + en.amount;
+    });
+    var categoryBreakdown = Object.keys(catMap).map(function (k) { return { category: k, amount: catMap[k] }; })
+      .sort(function (a, b) { return b.amount - a.amount; });
+
+    var memberMap = {};
+    (household.members || []).forEach(function (m) {
+      memberMap[m.id] = { displayName: m.displayName, income: 0, expense: 0 };
+    });
+    monthEntries.forEach(function (en) {
+      if (!memberMap[en.viewerId]) memberMap[en.viewerId] = { displayName: en.displayName, income: 0, expense: 0 };
+      if (en.type === "income") memberMap[en.viewerId].income += en.amount;
+      else memberMap[en.viewerId].expense += en.amount;
+    });
+    var memberBreakdown = Object.keys(memberMap).map(function (k) { return memberMap[k]; });
+
+    return { monthEntries: monthEntries, income: income, expense: expense, balance: income - expense, categoryBreakdown: categoryBreakdown, memberBreakdown: memberBreakdown };
+  }
+
+  function categoryChartSVG(data) {
+    if (!data.length) return "";
+    var w = 640, rowH = 30, top = 6, left = 130, right = 70;
+    var maxVal = Math.max.apply(null, data.map(function (d) { return d.amount; })) || 1;
+    var h = top * 2 + data.length * rowH;
+    var barMaxW = w - left - right;
+    var rows = data.map(function (d, i) {
+      var y = top + i * rowH;
+      var barW = Math.max(2, (d.amount / maxVal) * barMaxW);
+      return (
+        '<text x="' + (left - 10) + '" y="' + (y + rowH / 2 + 4) + '" text-anchor="end" font-size="12" fill="var(--ink)">' + esc(d.category) + '</text>' +
+        '<rect x="' + left + '" y="' + (y + 6) + '" width="' + barW + '" height="' + (rowH - 12) + '" rx="2" fill="var(--expense)" />' +
+        '<text x="' + (left + barW + 8) + '" y="' + (y + rowH / 2 + 4) + '" font-size="11.5" fill="var(--ink-soft)" font-family=\'"Space Grotesk", monospace\'>' + peso(d.amount) + '</text>'
+      );
+    }).join("");
+    return '<svg viewBox="0 0 ' + w + ' ' + h + '" width="100%" style="max-width:640px;display:block" xmlns="http://www.w3.org/2000/svg">' + rows + '</svg>';
+  }
+
+  function spentFor(categoryBreakdown, category) {
+    var found = categoryBreakdown.filter(function (c) { return c.category === category; })[0];
+    return found ? found.amount : 0;
+  }
+
+  function budgetSectionHTML(d) {
+    var monthBudgets = currentMonthBudgets();
+    var categories = Object.keys(monthBudgets);
+
+    var rows = categories.map(function (cat) {
+      var budget = monthBudgets[cat];
+      var spent = spentFor(d.categoryBreakdown, cat);
+      var remaining = budget - spent;
+      var pct = budget > 0 ? Math.min(100, (spent / budget) * 100) : 0;
+      var over = remaining < 0;
+      var barColor = over ? "var(--expense)" : "var(--gold)";
+      var noteColor = over ? "var(--expense)" : "var(--ink-soft)";
+      return (
+        '<div class="budget-row">' +
+          '<div class="budget-row-head">' +
+            '<div style="font-size:13px;font-weight:500">' + esc(cat) + '</div>' +
+            '<div style="display:flex;align-items:center;gap:8px">' +
+              '<div class="num" style="font-size:12.5px;color:' + noteColor + '">' + peso(spent) + ' / ' + peso(budget) + '</div>' +
+              '<button class="btn-icon" data-rmbudget="' + esc(cat) + '" title="Tanggalin ang budget" aria-label="Tanggalin ang budget">\u2715</button>' +
+            '</div>' +
+          '</div>' +
+          '<div class="budget-bar-track"><div class="budget-bar-fill" style="width:' + pct + '%;background:' + barColor + '"></div></div>' +
+          '<div class="budget-note" style="color:' + noteColor + '">' + (over ? "Sobra ng " + peso(Math.abs(remaining)) : "Natitira: " + peso(remaining)) + '</div>' +
+        '</div>'
+      );
+    }).join("");
+
+    return (
+      '<div style="margin-bottom:28px">' +
+        '<div class="section-label">Mga Budget \u2014 ' + MONTHS_FIL[activeMonthIdx] + '</div>' +
+        (rows || '<div class="entry-empty" style="margin-bottom:14px">Wala pang na-set na budget ngayong buwan.</div>') +
+        '<form id="budget-form" class="two-col" style="align-items:end;margin-top:6px">' +
+          '<label class="field">Kategorya<select class="input" id="f-budget-category">' +
+            EXPENSE_CATEGORIES.map(function (c) { return '<option value="' + esc(c) + '">' + esc(c) + '</option>'; }).join("") +
+          '</select></label>' +
+          '<label class="field">Budget (\u20B1)<input class="input" type="number" min="0" step="0.01" id="f-budget-amount" placeholder="0.00" /></label>' +
+          '<button type="submit" class="btn-primary" style="grid-column:1 / -1">I-set ang budget</button>' +
+        '</form>' +
+      '</div>'
+    );
+  }
+
+  function entryRowHTML(en) {
+    var canDelete = en.viewerId === profile.viewerId;
+    return (
+      '<div class="entry-row">' +
+        '<div>' +
+          '<div style="font-weight:500">' + esc(en.category) + '</div>' +
+          '<div style="color:var(--ink-soft)">' + esc(en.displayName) + ' \u00B7 ' + esc(en.date) + (en.note ? ' \u00B7 ' + esc(en.note) : '') + '</div>' +
+        '</div>' +
+        '<div style="display:flex;align-items:center;gap:8px;flex-shrink:0">' +
+          '<div class="num">' + peso(en.amount) + '</div>' +
+          (canDelete ? '<button class="btn-icon" data-del="' + esc(en.id) + '" data-owner="' + esc(en.viewerId) + '" title="Tanggalin" aria-label="Tanggalin ang tala">\u2715</button>' : '') +
+        '</div>' +
+      '</div>'
+    );
+  }
+
+  function ledgerColumnHTML(title, colorVar, total, entries, borderClass) {
+    var body = entries.length
+      ? '<div class="entry-list">' + entries.map(entryRowHTML).join("") + '</div>'
+      : '<div class="entry-empty">Walang tala pa.</div>';
+    return (
+      '<div class="ledger-col ' + borderClass + '">' +
+        '<div class="ledger-head">' +
+          '<div style="font-size:13px;font-weight:600;color:' + colorVar + '">' + title + '</div>' +
+          '<div class="num" style="font-weight:700;color:' + colorVar + '">' + peso(total) + '</div>' +
+        '</div>' +
+        body +
+      '</div>'
+    );
+  }
+
+  function renderAuth() {
+    var createActive = authMode === "create";
+    root.innerHTML =
+      '<div class="auth-shell"><div class="auth-card">' +
+        '<div style="margin-bottom:28px">' +
+          '<div class="serif" style="font-weight:700;font-size:34px;letter-spacing:-0.01em">Alkansya</div>' +
+          '<div style="color:var(--ink-soft);font-size:14px;margin-top:4px;border-top:1px solid var(--rule);padding-top:10px">Ang libreta ng pamilya para sa kita at gastos.</div>' +
+        '</div>' +
+        '<div class="tabs">' +
+          '<button class="tab-btn ' + (createActive ? "active" : "") + '" id="tab-create">Gumawa ng sambahayan</button>' +
+          '<button class="tab-btn ' + (!createActive ? "active" : "") + '" id="tab-join">Sumali sa sambahayan</button>' +
+        '</div>' +
+        (authError ? '<div class="err">' + esc(authError) + '</div>' : '') +
+        '<form id="auth-form">' +
+          '<label class="field">Inyong pangalan<input class="input" id="f-display" placeholder="Hal. Nanay Rosa" /></label>' +
+          (createActive
+            ? '<label class="field">Pangalan ng sambahayan<input class="input" id="f-household" placeholder="Hal. Pamilya Santos" /></label>'
+            : '<label class="field">Household code<input class="input" id="f-code" placeholder="Hal. SANT-482" /></label>') +
+          '<button type="submit" class="btn-primary" ' + (busy ? "disabled" : "") + '>' + (busy ? "Ginagawa..." : (createActive ? "Gumawa ng sambahayan" : "Sumali")) + '</button>' +
+        '</form>' +
+        '<div class="disclaimer">Ang link na ito ay para lamang sa inyong pamilya. Sinumang may hawak ng link ay makakakita at makakadagdag ng tala sa sambahayang ito.</div>' +
+      '</div></div>';
+
+    document.getElementById("tab-create").onclick = function () { authMode = "create"; authError = ""; render(); };
+    document.getElementById("tab-join").onclick = function () { authMode = "join"; authError = ""; render(); };
+    document.getElementById("auth-form").onsubmit = function (e) {
+      e.preventDefault();
+      var displayName = document.getElementById("f-display").value;
+      if (createActive) {
+        handleCreate(document.getElementById("f-household").value, displayName);
+      } else {
+        handleJoin(document.getElementById("f-code").value, displayName);
+      }
+    };
+  }
+
+  function renderLoading(msg) {
+    root.innerHTML = '<div class="auth-shell"><div style="color:var(--ink-soft);font-size:14px">' + esc(msg || "Naglo-load...") + '</div></div>';
+  }
+
+  function renderNoDb() {
+    root.innerHTML = '<div class="auth-shell"><div class="auth-card" style="text-align:center">' +
+      '<div class="serif" style="font-weight:700;font-size:26px;margin-bottom:10px">Alkansya</div>' +
+      '<div style="color:var(--ink-soft);font-size:14px;line-height:1.6">Kailangang naka-sign in sa Claude ang bawat gagamit ng app na ito para makita ang shared na datos ng sambahayan. Pakisuri ang inyong pag-sign in at subukang i-reload ang pahina.</div>' +
+      '</div></div>';
+  }
+
+  function renderMissingHousehold() {
+    root.innerHTML = '<div class="auth-shell"><div class="auth-card" style="text-align:center">' +
+      '<div class="serif" style="font-weight:700;font-size:26px;margin-bottom:10px">Hindi mahanap ang sambahayan</div>' +
+      '<div style="color:var(--ink-soft);font-size:14px;margin-bottom:18px">Maaaring natanggal na ang sambahayang ito.</div>' +
+      '<button class="btn-primary" id="reset-btn">Bumalik sa setup</button>' +
+      '</div></div>';
+    document.getElementById("reset-btn").onclick = handleLogout;
+  }
+
+  function renderDashboard() {
+    var d = computeMonthData();
+    var showMembers = (household.members || []).length > 1;
+
+    root.innerHTML =
+      '<div class="wrap">' +
+        '<div class="top-bar">' +
+          '<div>' +
+            '<div class="serif" style="font-weight:700;font-size:26px;letter-spacing:-0.01em">Alkansya</div>' +
+            '<div style="font-size:13px;color:var(--ink-soft);margin-top:2px">' + esc(household.name) + ' \u00B7 Kumusta, ' + esc(profile.displayName) + '!</div>' +
+          '</div>' +
+          '<div style="display:flex;align-items:center;gap:14px">' +
+            '<div class="code-chip num">' + esc(household.__code) + '</div>' +
+            '<button class="btn-ghost" id="logout-btn">Umalis</button>' +
+          '</div>' +
+        '</div>' +
+
+        '<div class="month-nav">' +
+          '<button class="btn-icon" id="prev-month" aria-label="Nakaraang buwan">\u2190</button>' +
+          '<div class="num" style="font-size:14px;letter-spacing:0.05em;color:var(--ink-soft)">' + MONTHS_FIL[activeMonthIdx] + ' ' + activeYear + '</div>' +
+          '<button class="btn-icon" id="next-month" aria-label="Susunod na buwan">\u2192</button>' +
+        '</div>' +
+
+        '<div class="balance">' +
+          '<div style="font-size:13px;color:var(--ink-soft);margin-bottom:4px">Natitirang pondo</div>' +
+          '<div class="num amt" style="color:' + (d.balance >= 0 ? "var(--income)" : "var(--expense)") + '">' + peso(d.balance) + '</div>' +
+        '</div>' +
+
+        '<div class="ledger-grid">' +
+          ledgerColumnHTML("Kita", "var(--income)", d.income, d.monthEntries.filter(function (e) { return e.type === "income"; }), "left") +
+          ledgerColumnHTML("Gastos", "var(--expense)", d.expense, d.monthEntries.filter(function (e) { return e.type === "expense"; }), "") +
+        '</div>' +
+
+        budgetSectionHTML(d) +
+
+        (d.categoryBreakdown.length
+          ? '<div style="margin-bottom:28px"><div class="section-label">Paghahati-hati ng gastos</div><div class="overflow-x">' + categoryChartSVG(d.categoryBreakdown) + '</div></div>'
+          : "") +
+
+        (showMembers
+          ? '<div style="margin-bottom:28px"><div class="section-label">Ambag ng bawat miyembro</div><div class="overflow-x"><table><thead><tr><th>Miyembro</th><th style="text-align:right">Kita</th><th style="text-align:right">Gastos</th></tr></thead><tbody>' +
+            d.memberBreakdown.map(function (m) {
+              return '<tr><td>' + esc(m.displayName) + '</td><td class="num" style="text-align:right;color:var(--income)">' + peso(m.income) + '</td><td class="num" style="text-align:right;color:var(--expense)">' + peso(m.expense) + '</td></tr>';
+            }).join("") + '</tbody></table></div></div>'
+          : "") +
+
+        '<div>' +
+          '<div class="section-label">Idagdag na tala</div>' +
+          '<form id="entry-form">' +
+            '<div class="radio-row">' +
+              '<label><input type="radio" name="etype" value="expense" ' + (entryType === "expense" ? "checked" : "") + '/> Gasto</label>' +
+              '<label><input type="radio" name="etype" value="income" ' + (entryType === "income" ? "checked" : "") + '/> Kita</label>' +
+            '</div>' +
+            '<div class="two-col">' +
+              '<label class="field">Kategorya<select class="input" id="f-category">' +
+                (entryType === "income" ? INCOME_CATEGORIES : EXPENSE_CATEGORIES).map(function (c) {
+                  return '<option value="' + esc(c) + '" ' + (c === entryCategory ? "selected" : "") + '>' + esc(c) + '</option>';
+                }).join("") +
+              '</select></label>' +
+              '<label class="field">Halaga (\u20B1)<input class="input" type="number" min="0" step="0.01" id="f-amount" placeholder="0.00" /></label>' +
+            '</div>' +
+            (entryType === "expense" && currentMonthBudgets()[entryCategory] !== undefined
+              ? (function () {
+                  var rem = currentMonthBudgets()[entryCategory] - spentFor(d.categoryBreakdown, entryCategory);
+                  return '<div class="budget-hint" style="color:' + (rem < 0 ? "var(--expense)" : "var(--ink-soft)") + '">Natitirang badyet sa ' + esc(entryCategory) + ': ' + peso(rem) + '</div>';
+                })()
+              : "") +
+            '<div class="two-col">' +
+              '<label class="field">Tala (opsyonal)<input class="input" id="f-note" placeholder="Hal. Grocery sa Puregold" /></label>' +
+              '<label class="field">Petsa<input class="input" type="date" id="f-date" value="' + todayISO() + '" /></label>' +
+            '</div>' +
+            '<button type="submit" class="btn-primary">+ Idagdag</button>' +
+          '</form>' +
+        '</div>' +
+      '</div>';
+
+    document.getElementById("logout-btn").onclick = handleLogout;
+    document.getElementById("prev-month").onclick = function () { shiftMonth(-1); };
+    document.getElementById("next-month").onclick = function () { shiftMonth(1); };
+
+    Array.prototype.forEach.call(document.querySelectorAll('input[name="etype"]'), function (r) {
+      r.onchange = function () {
+        entryType = r.value;
+        entryCategory = (entryType === "income" ? INCOME_CATEGORIES : EXPENSE_CATEGORIES)[0];
+        render();
+      };
+    });
+    document.getElementById("f-category").onchange = function (e) { entryCategory = e.target.value; };
+
+    document.getElementById("entry-form").onsubmit = function (e) {
+      e.preventDefault();
+      var amount = document.getElementById("f-amount").value;
+      var note = document.getElementById("f-note").value;
+      var date = document.getElementById("f-date").value;
+      addEntry(amount, note, date).then(function () {
+        document.getElementById("f-amount").value = "";
+        document.getElementById("f-note").value = "";
+      });
+    };
+
+    Array.prototype.forEach.call(root.querySelectorAll("[data-del]"), function (btn) {
+      btn.onclick = function () { deleteEntry(btn.getAttribute("data-del"), btn.getAttribute("data-owner")); };
+    });
+
+    var budgetForm = document.getElementById("budget-form");
+    if (budgetForm) {
+      budgetForm.onsubmit = function (e) {
+        e.preventDefault();
+        var cat = document.getElementById("f-budget-category").value;
+        var amt = document.getElementById("f-budget-amount").value;
+        setBudget(cat, amt);
+      };
+    }
+    Array.prototype.forEach.call(root.querySelectorAll("[data-rmbudget]"), function (btn) {
+      btn.onclick = function () { removeBudget(btn.getAttribute("data-rmbudget")); };
+    });
+  }
+
+  function render() {
+    if (view === "loading") { renderLoading(); }
+    else if (view === "setup") { renderAuth(); }
+    else if (view === "missing-household") { renderMissingHousehold(); }
+    else if (view === "dashboard" && household) { renderDashboard(); }
+    else { renderLoading(); }
+
+    if (toastMsg) {
+      var t = document.createElement("div");
+      t.className = "toast";
+      t.textContent = toastMsg;
+      document.body.appendChild(t);
+    } else {
+      var existing = document.querySelectorAll(".toast");
+      existing.forEach(function (el) { el.remove(); });
+    }
+  }
+
+  render();
+  initDb();
+})();
+</script>
+</body>
+</html>

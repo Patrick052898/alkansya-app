@@ -1,0 +1,120 @@
+const express = require("express");
+const fs = require("fs");
+const path = require("path");
+const crypto = require("crypto");
+
+const PORT = process.env.PORT || 3000;
+const DATA_DIR = path.join(__dirname, "data");
+const DATA_FILE = path.join(DATA_DIR, "households.json");
+
+if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+if (!fs.existsSync(DATA_FILE)) fs.writeFileSync(DATA_FILE, JSON.stringify({}), "utf8");
+
+// Simple synchronous read/write. Traffic on a family budget app is low
+// enough that this avoids needing a real database or write queue.
+function readAll() {
+  try {
+    return JSON.parse(fs.readFileSync(DATA_FILE, "utf8"));
+  } catch (e) {
+    return {};
+  }
+}
+function writeAll(all) {
+  fs.writeFileSync(DATA_FILE, JSON.stringify(all, null, 2), "utf8");
+}
+
+function uid() {
+  return crypto.randomBytes(6).toString("hex");
+}
+
+function genCode(name, all) {
+  const base = (name || "PAM")
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, "")
+    .slice(0, 4)
+    .padEnd(4, "X");
+  let code;
+  let tries = 0;
+  do {
+    const rand = Math.floor(100 + Math.random() * 900);
+    code = base + "-" + rand;
+    tries++;
+  } while (all[code] && tries < 20);
+  return code;
+}
+
+const app = express();
+app.use(express.json());
+app.use(express.static(path.join(__dirname, "public")));
+
+// Create a new household. Body: { householdName, displayName }
+app.post("/api/households", (req, res) => {
+  const { householdName, displayName } = req.body || {};
+  if (!householdName || !householdName.trim()) {
+    return res.status(400).json({ error: "Kailangan ang pangalan ng sambahayan." });
+  }
+  if (!displayName || !displayName.trim()) {
+    return res.status(400).json({ error: "Kailangan ang inyong pangalan." });
+  }
+  const all = readAll();
+  const code = genCode(householdName, all);
+  const viewerId = uid();
+  const household = {
+    code,
+    name: householdName.trim(),
+    members: [{ id: viewerId, displayName: displayName.trim() }],
+    entries: [],
+    budgets: {},
+  };
+  all[code] = household;
+  writeAll(all);
+  res.json({ code, viewerId, household });
+});
+
+// Join an existing household. Body: { displayName }
+app.post("/api/households/:code/join", (req, res) => {
+  const code = req.params.code.toUpperCase();
+  const { displayName } = req.body || {};
+  if (!displayName || !displayName.trim()) {
+    return res.status(400).json({ error: "Kailangan ang inyong pangalan." });
+  }
+  const all = readAll();
+  const household = all[code];
+  if (!household) {
+    return res.status(404).json({ error: "Walang sambahayang natagpuan sa code na iyan." });
+  }
+  const viewerId = uid();
+  household.members.push({ id: viewerId, displayName: displayName.trim() });
+  writeAll(all);
+  res.json({ code, viewerId, household });
+});
+
+// Fetch a household (used on load and by polling for live-ish updates)
+app.get("/api/households/:code", (req, res) => {
+  const code = req.params.code.toUpperCase();
+  const all = readAll();
+  const household = all[code];
+  if (!household) return res.status(404).json({ error: "not_found" });
+  res.json({ household });
+});
+
+// Partial update: body may include entries, budgets, and/or members
+app.patch("/api/households/:code", (req, res) => {
+  const code = req.params.code.toUpperCase();
+  const all = readAll();
+  const household = all[code];
+  if (!household) return res.status(404).json({ error: "not_found" });
+
+  const { entries, budgets, members } = req.body || {};
+  if (entries !== undefined) household.entries = entries;
+  if (budgets !== undefined) household.budgets = budgets;
+  if (members !== undefined) household.members = members;
+
+  all[code] = household;
+  writeAll(all);
+  res.json({ household });
+});
+
+app.listen(PORT, () => {
+  console.log("Alkansya running on port " + PORT);
+});

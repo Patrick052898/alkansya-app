@@ -51,10 +51,10 @@ app.use(express.static(path.join(__dirname, "public")));
 app.post("/api/households", (req, res) => {
   const { householdName, displayName } = req.body || {};
   if (!householdName || !householdName.trim()) {
-    return res.status(400).json({ error: "Household name is required." });
+    return res.status(400).json({ error: "Kailangan ang pangalan ng sambahayan." });
   }
   if (!displayName || !displayName.trim()) {
-    return res.status(400).json({ error: "Your name is required." });
+    return res.status(400).json({ error: "Kailangan ang inyong pangalan." });
   }
   const all = readAll();
   const code = genCode(householdName, all);
@@ -76,12 +76,12 @@ app.post("/api/households/:code/join", (req, res) => {
   const code = req.params.code.toUpperCase();
   const { displayName } = req.body || {};
   if (!displayName || !displayName.trim()) {
-    return res.status(400).json({ error: "Your name is required." });
+    return res.status(400).json({ error: "Kailangan ang inyong pangalan." });
   }
   const all = readAll();
   const household = all[code];
   if (!household) {
-    return res.status(404).json({ error: "not_found" });
+    return res.status(404).json({ error: "Walang sambahayang natagpuan sa code na iyan." });
   }
   const viewerId = uid();
   household.members.push({ id: viewerId, displayName: displayName.trim() });

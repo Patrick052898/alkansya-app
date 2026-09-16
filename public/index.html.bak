@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="fil">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -168,9 +168,9 @@
 (function () {
   "use strict";
 
-  var MONTHS_FIL = ["January","February","March","April","May","June","July","August","September","October","November","December"];
-  var INCOME_CATEGORIES = ["Salary","Business","Remittance","Other Income"];
-  var EXPENSE_CATEGORIES = ["Food","Rent/Housing","Electricity","Water","Load/Internet","Transportation","Savings","Debt","Education","Health","Entertainment","Other"];
+  var MONTHS_FIL = ["Enero","Pebrero","Marso","Abril","Mayo","Hunyo","Hulyo","Agosto","Setyembre","Oktubre","Nobyembre","Disyembre"];
+  var INCOME_CATEGORIES = ["Suweldo","Negosyo","Padala","Iba pang Kita"];
+  var EXPENSE_CATEGORIES = ["Pagkain","Bahay/Renta","Kuryente","Tubig","Load/Internet","Pamasahe","Ipon","Utang","Edukasyon","Kalusugan","Libangan","Iba pa"];
 
   var root = document.getElementById("root");
   var profile = loadProfile(); // {householdCode, viewerId, displayName} | null
@@ -238,18 +238,13 @@
   var API = "/api";
 
   async function apiCall(path, opts) {
-    var res;
-    try {
-      res = await fetch(API + path, Object.assign({
-        headers: { "Content-Type": "application/json" }
-      }, opts || {}));
-    } catch (e) {
-      throw new Error("network_error");
-    }
+    var res = await fetch(API + path, Object.assign({
+      headers: { "Content-Type": "application/json" }
+    }, opts || {}));
     var body = null;
     try { body = await res.json(); } catch (e) {}
     if (!res.ok) {
-      var msg = (body && body.error) || (!body ? "server_unreachable" : ("HTTP " + res.status));
+      var msg = (body && body.error) || ("HTTP " + res.status);
       throw new Error(msg);
     }
     return body;
@@ -294,8 +289,8 @@
 
   async function handleCreate(name, displayName) {
     authError = "";
-    if (!name.trim()) { authError = "Please name your household."; render(); return; }
-    if (!displayName.trim()) { authError = "Please enter your name."; render(); return; }
+    if (!name.trim()) { authError = "Pangalanan ang inyong sambahayan."; render(); return; }
+    if (!displayName.trim()) { authError = "Ilagay ang inyong pangalan."; render(); return; }
     busy = true; render();
     try {
       var body = await apiCall("/households", {
@@ -305,12 +300,10 @@
       saveProfile({ householdCode: body.code, viewerId: body.viewerId, displayName: displayName.trim() });
       busy = false;
       subscribeHousehold(body.code);
-      showToast("Household created!");
+      showToast("Nagawa ang sambahayan!");
     } catch (e) {
       busy = false;
-      authError = (e.message === "server_unreachable" || e.message === "network_error")
-        ? "Can't reach the server. Make sure the app's backend is running (npm start), then reload the page."
-        : "Something went wrong creating the household. Please try again.";
+      authError = "Nagka-problema sa paggawa. Subukan ulit.";
       render();
     }
   }
@@ -318,8 +311,8 @@
   async function handleJoin(codeInput, displayName) {
     authError = "";
     var code = codeInput.trim().toUpperCase();
-    if (!code) { authError = "Please enter the household code."; render(); return; }
-    if (!displayName.trim()) { authError = "Please enter your name."; render(); return; }
+    if (!code) { authError = "Ilagay ang code ng sambahayan."; render(); return; }
+    if (!displayName.trim()) { authError = "Ilagay ang inyong pangalan."; render(); return; }
     busy = true; render();
     try {
       var body = await apiCall("/households/" + encodeURIComponent(code) + "/join", {
@@ -329,14 +322,12 @@
       saveProfile({ householdCode: code, viewerId: body.viewerId, displayName: displayName.trim() });
       busy = false;
       subscribeHousehold(code);
-      showToast("Joined " + body.household.name + "!");
+      showToast("Sumali sa " + body.household.name + "!");
     } catch (e) {
       busy = false;
       authError = e.message === "not_found"
-        ? 'No household found with that code "' + esc(code) + '".'
-        : (e.message === "server_unreachable" || e.message === "network_error")
-          ? "Can't reach the server. Make sure the app's backend is running (npm start), then reload the page."
-          : "Something went wrong joining. Please try again.";
+        ? 'Walang sambahayang natagpuan sa code na "' + esc(code) + '".'
+        : "Nagka-problema sa pagsali. Subukan ulit.";
       render();
     }
   }
@@ -360,7 +351,7 @@
 
   async function addEntry(amount, note, date) {
     var amt = parseFloat(amount);
-    if (!amt || amt <= 0) { showToast("Please enter a valid amount."); return; }
+    if (!amt || amt <= 0) { showToast("Ilagay ang wastong halaga."); return; }
     var entry = {
       id: uid(),
       viewerId: profile.viewerId,
@@ -375,29 +366,29 @@
     try {
       await patchHousehold({ entries: entries });
       render();
-      showToast(entryType === "income" ? "Income added." : "Expense added.");
+      showToast(entryType === "income" ? "Naidagdag ang kita." : "Naidagdag ang gasto.");
     } catch (e) {
-      showToast("Couldn't save — please try again.");
+      showToast("Hindi na-save — subukan ulit.");
     }
   }
 
   async function deleteEntry(id, ownerViewerId) {
     if (ownerViewerId !== profile.viewerId) return;
-    if (!window.confirm("Delete this entry?")) return;
+    if (!window.confirm("Tanggalin ang talang ito?")) return;
     var entries = (household.entries || []).filter(function (en) { return en.id !== id; });
     try {
       await patchHousehold({ entries: entries });
       render();
-      showToast("Entry deleted.");
+      showToast("Tinanggal ang tala.");
     } catch (e) {
-      showToast("Couldn't delete — please try again.");
+      showToast("Hindi na-tanggal — subukan ulit.");
     }
   }
 
   async function setBudget(category, amountStr) {
     var amt = parseFloat(amountStr);
-    if (!category) { showToast("Please select a category."); return; }
-    if (!amt || amt <= 0) { showToast("Please enter a valid amount."); return; }
+    if (!category) { showToast("Pumili ng kategorya."); return; }
+    if (!amt || amt <= 0) { showToast("Ilagay ang wastong halaga."); return; }
     var mk = monthKey(activeYear, activeMonthIdx);
     var budgets = Object.assign({}, household.budgets || {});
     budgets[mk] = Object.assign({}, budgets[mk] || {});
@@ -405,9 +396,9 @@
     try {
       await patchHousehold({ budgets: budgets });
       render();
-      showToast("Budget set for " + category + ".");
+      showToast("Na-set ang budget para sa " + category + ".");
     } catch (e) {
-      showToast("Couldn't save the budget — please try again.");
+      showToast("Hindi na-save ang budget — subukan ulit.");
     }
   }
 
@@ -421,9 +412,9 @@
       try {
         await patchHousehold({ budgets: budgets });
         render();
-        showToast("Budget removed.");
+        showToast("Tinanggal ang budget.");
       } catch (e) {
-        showToast("Couldn't delete — please try again.");
+        showToast("Hindi na-tanggal — subukan ulit.");
       }
     }
   }
@@ -508,25 +499,25 @@
             '<div style="font-size:13px;font-weight:500">' + esc(cat) + '</div>' +
             '<div style="display:flex;align-items:center;gap:8px">' +
               '<div class="num" style="font-size:12.5px;color:' + noteColor + '">' + peso(spent) + ' / ' + peso(budget) + '</div>' +
-              '<button class="btn-icon" data-rmbudget="' + esc(cat) + '" title="Remove budget" aria-label="Remove budget">\u2715</button>' +
+              '<button class="btn-icon" data-rmbudget="' + esc(cat) + '" title="Tanggalin ang budget" aria-label="Tanggalin ang budget">\u2715</button>' +
             '</div>' +
           '</div>' +
           '<div class="budget-bar-track"><div class="budget-bar-fill" style="width:' + pct + '%;background:' + barColor + '"></div></div>' +
-          '<div class="budget-note" style="color:' + noteColor + '">' + (over ? "Over by " + peso(Math.abs(remaining)) : "Remaining: " + peso(remaining)) + '</div>' +
+          '<div class="budget-note" style="color:' + noteColor + '">' + (over ? "Sobra ng " + peso(Math.abs(remaining)) : "Natitira: " + peso(remaining)) + '</div>' +
         '</div>'
       );
     }).join("");
 
     return (
       '<div style="margin-bottom:28px">' +
-        '<div class="section-label">Budgets \u2014 ' + MONTHS_FIL[activeMonthIdx] + '</div>' +
-        (rows || '<div class="entry-empty" style="margin-bottom:14px">No budget set for this month yet.</div>') +
+        '<div class="section-label">Mga Budget \u2014 ' + MONTHS_FIL[activeMonthIdx] + '</div>' +
+        (rows || '<div class="entry-empty" style="margin-bottom:14px">Wala pang na-set na budget ngayong buwan.</div>') +
         '<form id="budget-form" class="two-col" style="align-items:end;margin-top:6px">' +
-          '<label class="field">Category<select class="input" id="f-budget-category">' +
+          '<label class="field">Kategorya<select class="input" id="f-budget-category">' +
             EXPENSE_CATEGORIES.map(function (c) { return '<option value="' + esc(c) + '">' + esc(c) + '</option>'; }).join("") +
           '</select></label>' +
           '<label class="field">Budget (\u20B1)<input class="input" type="number" min="0" step="0.01" id="f-budget-amount" placeholder="0.00" /></label>' +
-          '<button type="submit" class="btn-primary" style="grid-column:1 / -1">Set budget</button>' +
+          '<button type="submit" class="btn-primary" style="grid-column:1 / -1">I-set ang budget</button>' +
         '</form>' +
       '</div>'
     );
@@ -542,7 +533,7 @@
         '</div>' +
         '<div style="display:flex;align-items:center;gap:8px;flex-shrink:0">' +
           '<div class="num">' + peso(en.amount) + '</div>' +
-          (canDelete ? '<button class="btn-icon" data-del="' + esc(en.id) + '" data-owner="' + esc(en.viewerId) + '" title="Delete" aria-label="Delete entry">\u2715</button>' : '') +
+          (canDelete ? '<button class="btn-icon" data-del="' + esc(en.id) + '" data-owner="' + esc(en.viewerId) + '" title="Tanggalin" aria-label="Tanggalin ang tala">\u2715</button>' : '') +
         '</div>' +
       '</div>'
     );
@@ -551,7 +542,7 @@
   function ledgerColumnHTML(title, colorVar, total, entries, borderClass) {
     var body = entries.length
       ? '<div class="entry-list">' + entries.map(entryRowHTML).join("") + '</div>'
-      : '<div class="entry-empty">No entries yet.</div>';
+      : '<div class="entry-empty">Walang tala pa.</div>';
     return (
       '<div class="ledger-col ' + borderClass + '">' +
         '<div class="ledger-head">' +
@@ -569,21 +560,21 @@
       '<div class="auth-shell"><div class="auth-card">' +
         '<div style="margin-bottom:28px">' +
           '<div class="serif" style="font-weight:700;font-size:34px;letter-spacing:-0.01em">Alkansya</div>' +
-          '<div style="color:var(--ink-soft);font-size:14px;margin-top:4px;border-top:1px solid var(--rule);padding-top:10px">The family notebook for income and expenses.</div>' +
+          '<div style="color:var(--ink-soft);font-size:14px;margin-top:4px;border-top:1px solid var(--rule);padding-top:10px">Ang libreta ng pamilya para sa kita at gastos.</div>' +
         '</div>' +
         '<div class="tabs">' +
-          '<button class="tab-btn ' + (createActive ? "active" : "") + '" id="tab-create">Create a household</button>' +
-          '<button class="tab-btn ' + (!createActive ? "active" : "") + '" id="tab-join">Join a household</button>' +
+          '<button class="tab-btn ' + (createActive ? "active" : "") + '" id="tab-create">Gumawa ng sambahayan</button>' +
+          '<button class="tab-btn ' + (!createActive ? "active" : "") + '" id="tab-join">Sumali sa sambahayan</button>' +
         '</div>' +
         (authError ? '<div class="err">' + esc(authError) + '</div>' : '') +
         '<form id="auth-form">' +
-          '<label class="field">Your name<input class="input" id="f-display" placeholder="e.g. Mom Rosa" /></label>' +
+          '<label class="field">Inyong pangalan<input class="input" id="f-display" placeholder="Hal. Nanay Rosa" /></label>' +
           (createActive
-            ? '<label class="field">Household name<input class="input" id="f-household" placeholder="e.g. The Santos Family" /></label>'
-            : '<label class="field">Household code<input class="input" id="f-code" placeholder="e.g. SANT-482" /></label>') +
-          '<button type="submit" class="btn-primary" ' + (busy ? "disabled" : "") + '>' + (busy ? "Creating..." : (createActive ? "Create household" : "Join")) + '</button>' +
+            ? '<label class="field">Pangalan ng sambahayan<input class="input" id="f-household" placeholder="Hal. Pamilya Santos" /></label>'
+            : '<label class="field">Household code<input class="input" id="f-code" placeholder="Hal. SANT-482" /></label>') +
+          '<button type="submit" class="btn-primary" ' + (busy ? "disabled" : "") + '>' + (busy ? "Ginagawa..." : (createActive ? "Gumawa ng sambahayan" : "Sumali")) + '</button>' +
         '</form>' +
-        '<div class="disclaimer">This link is for your family only. Anyone who has the link can view and add entries to this household.</div>' +
+        '<div class="disclaimer">Ang link na ito ay para lamang sa inyong pamilya. Sinumang may hawak ng link ay makakakita at makakadagdag ng tala sa sambahayang ito.</div>' +
       '</div></div>';
 
     document.getElementById("tab-create").onclick = function () { authMode = "create"; authError = ""; render(); };
@@ -600,21 +591,21 @@
   }
 
   function renderLoading(msg) {
-    root.innerHTML = '<div class="auth-shell"><div style="color:var(--ink-soft);font-size:14px">' + esc(msg || "Loading...") + '</div></div>';
+    root.innerHTML = '<div class="auth-shell"><div style="color:var(--ink-soft);font-size:14px">' + esc(msg || "Naglo-load...") + '</div></div>';
   }
 
   function renderNoDb() {
     root.innerHTML = '<div class="auth-shell"><div class="auth-card" style="text-align:center">' +
       '<div class="serif" style="font-weight:700;font-size:26px;margin-bottom:10px">Alkansya</div>' +
-      '<div style="color:var(--ink-soft);font-size:14px;line-height:1.6">Every user of this app needs to be signed in to see the household's shared data. Please check your sign-in and try reloading the page.</div>' +
+      '<div style="color:var(--ink-soft);font-size:14px;line-height:1.6">Kailangang naka-sign in sa Claude ang bawat gagamit ng app na ito para makita ang shared na datos ng sambahayan. Pakisuri ang inyong pag-sign in at subukang i-reload ang pahina.</div>' +
       '</div></div>';
   }
 
   function renderMissingHousehold() {
     root.innerHTML = '<div class="auth-shell"><div class="auth-card" style="text-align:center">' +
-      '<div class="serif" style="font-weight:700;font-size:26px;margin-bottom:10px">Household not found</div>' +
-      '<div style="color:var(--ink-soft);font-size:14px;margin-bottom:18px">This household may have been deleted.</div>' +
-      '<button class="btn-primary" id="reset-btn">Back to setup</button>' +
+      '<div class="serif" style="font-weight:700;font-size:26px;margin-bottom:10px">Hindi mahanap ang sambahayan</div>' +
+      '<div style="color:var(--ink-soft);font-size:14px;margin-bottom:18px">Maaaring natanggal na ang sambahayang ito.</div>' +
+      '<button class="btn-primary" id="reset-btn">Bumalik sa setup</button>' +
       '</div></div>';
     document.getElementById("reset-btn").onclick = handleLogout;
   }
@@ -628,69 +619,69 @@
         '<div class="top-bar">' +
           '<div>' +
             '<div class="serif" style="font-weight:700;font-size:26px;letter-spacing:-0.01em">Alkansya</div>' +
-            '<div style="font-size:13px;color:var(--ink-soft);margin-top:2px">' + esc(household.name) + ' \u00B7 Hi, ' + esc(profile.displayName) + '!</div>' +
+            '<div style="font-size:13px;color:var(--ink-soft);margin-top:2px">' + esc(household.name) + ' \u00B7 Kumusta, ' + esc(profile.displayName) + '!</div>' +
           '</div>' +
           '<div style="display:flex;align-items:center;gap:14px">' +
             '<div class="code-chip num">' + esc(household.__code) + '</div>' +
-            '<button class="btn-ghost" id="logout-btn">Log out</button>' +
+            '<button class="btn-ghost" id="logout-btn">Umalis</button>' +
           '</div>' +
         '</div>' +
 
         '<div class="month-nav">' +
-          '<button class="btn-icon" id="prev-month" aria-label="Previous month">\u2190</button>' +
+          '<button class="btn-icon" id="prev-month" aria-label="Nakaraang buwan">\u2190</button>' +
           '<div class="num" style="font-size:14px;letter-spacing:0.05em;color:var(--ink-soft)">' + MONTHS_FIL[activeMonthIdx] + ' ' + activeYear + '</div>' +
-          '<button class="btn-icon" id="next-month" aria-label="Next month">\u2192</button>' +
+          '<button class="btn-icon" id="next-month" aria-label="Susunod na buwan">\u2192</button>' +
         '</div>' +
 
         '<div class="balance">' +
-          '<div style="font-size:13px;color:var(--ink-soft);margin-bottom:4px">Remaining balance</div>' +
+          '<div style="font-size:13px;color:var(--ink-soft);margin-bottom:4px">Natitirang pondo</div>' +
           '<div class="num amt" style="color:' + (d.balance >= 0 ? "var(--income)" : "var(--expense)") + '">' + peso(d.balance) + '</div>' +
         '</div>' +
 
         '<div class="ledger-grid">' +
-          ledgerColumnHTML("Income", "var(--income)", d.income, d.monthEntries.filter(function (e) { return e.type === "income"; }), "left") +
-          ledgerColumnHTML("Expenses", "var(--expense)", d.expense, d.monthEntries.filter(function (e) { return e.type === "expense"; }), "") +
+          ledgerColumnHTML("Kita", "var(--income)", d.income, d.monthEntries.filter(function (e) { return e.type === "income"; }), "left") +
+          ledgerColumnHTML("Gastos", "var(--expense)", d.expense, d.monthEntries.filter(function (e) { return e.type === "expense"; }), "") +
         '</div>' +
 
         budgetSectionHTML(d) +
 
         (d.categoryBreakdown.length
-          ? '<div style="margin-bottom:28px"><div class="section-label">Expense breakdown</div><div class="overflow-x">' + categoryChartSVG(d.categoryBreakdown) + '</div></div>'
+          ? '<div style="margin-bottom:28px"><div class="section-label">Paghahati-hati ng gastos</div><div class="overflow-x">' + categoryChartSVG(d.categoryBreakdown) + '</div></div>'
           : "") +
 
         (showMembers
-          ? '<div style="margin-bottom:28px"><div class="section-label">Each member's contribution</div><div class="overflow-x"><table><thead><tr><th>Member</th><th style="text-align:right">Income</th><th style="text-align:right">Expenses</th></tr></thead><tbody>' +
+          ? '<div style="margin-bottom:28px"><div class="section-label">Ambag ng bawat miyembro</div><div class="overflow-x"><table><thead><tr><th>Miyembro</th><th style="text-align:right">Kita</th><th style="text-align:right">Gastos</th></tr></thead><tbody>' +
             d.memberBreakdown.map(function (m) {
               return '<tr><td>' + esc(m.displayName) + '</td><td class="num" style="text-align:right;color:var(--income)">' + peso(m.income) + '</td><td class="num" style="text-align:right;color:var(--expense)">' + peso(m.expense) + '</td></tr>';
             }).join("") + '</tbody></table></div></div>'
           : "") +
 
         '<div>' +
-          '<div class="section-label">Add entry</div>' +
+          '<div class="section-label">Idagdag na tala</div>' +
           '<form id="entry-form">' +
             '<div class="radio-row">' +
-              '<label><input type="radio" name="etype" value="expense" ' + (entryType === "expense" ? "checked" : "") + '/> Expense</label>' +
-              '<label><input type="radio" name="etype" value="income" ' + (entryType === "income" ? "checked" : "") + '/> Income</label>' +
+              '<label><input type="radio" name="etype" value="expense" ' + (entryType === "expense" ? "checked" : "") + '/> Gasto</label>' +
+              '<label><input type="radio" name="etype" value="income" ' + (entryType === "income" ? "checked" : "") + '/> Kita</label>' +
             '</div>' +
             '<div class="two-col">' +
-              '<label class="field">Category<select class="input" id="f-category">' +
+              '<label class="field">Kategorya<select class="input" id="f-category">' +
                 (entryType === "income" ? INCOME_CATEGORIES : EXPENSE_CATEGORIES).map(function (c) {
                   return '<option value="' + esc(c) + '" ' + (c === entryCategory ? "selected" : "") + '>' + esc(c) + '</option>';
                 }).join("") +
               '</select></label>' +
-              '<label class="field">Amount (\u20B1)<input class="input" type="number" min="0" step="0.01" id="f-amount" placeholder="0.00" /></label>' +
+              '<label class="field">Halaga (\u20B1)<input class="input" type="number" min="0" step="0.01" id="f-amount" placeholder="0.00" /></label>' +
             '</div>' +
             (entryType === "expense" && currentMonthBudgets()[entryCategory] !== undefined
               ? (function () {
                   var rem = currentMonthBudgets()[entryCategory] - spentFor(d.categoryBreakdown, entryCategory);
-                  return '<div class="budget-hint" style="color:' + (rem < 0 ? "var(--expense)" : "var(--ink-soft)") + '">Remaining budget for ' + esc(entryCategory) + ': ' + peso(rem) + '</div>';
+                  return '<div class="budget-hint" style="color:' + (rem < 0 ? "var(--expense)" : "var(--ink-soft)") + '">Natitirang badyet sa ' + esc(entryCategory) + ': ' + peso(rem) + '</div>';
                 })()
               : "") +
             '<div class="two-col">' +
-              '<label class="field">Note (optional)<input class="input" id="f-note" placeholder="e.g. Groceries at the store" /></label>' +
-              '<label class="field">Date<input class="input" type="date" id="f-date" value="' + todayISO() + '" /></label>' +
+              '<label class="field">Tala (opsyonal)<input class="input" id="f-note" placeholder="Hal. Grocery sa Puregold" /></label>' +
+              '<label class="field">Petsa<input class="input" type="date" id="f-date" value="' + todayISO() + '" /></label>' +
             '</div>' +
-            '<button type="submit" class="btn-primary">+ Add</button>' +
+            '<button type="submit" class="btn-primary">+ Idagdag</button>' +
           '</form>' +
         '</div>' +
       '</div>';

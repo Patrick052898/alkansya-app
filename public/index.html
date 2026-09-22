@@ -623,6 +623,26 @@
     var d = computeMonthData();
     var showMembers = (household.members || []).length > 1;
 
+    // Snapshot whatever is currently in the Add-entry form (and which
+    // field, if any, has focus) so a background poll refresh below
+    // doesn't wipe out text the user is mid-typing.
+    var preservedForm = null;
+    var existingForm = document.getElementById("entry-form");
+    if (existingForm) {
+      var pAmt = document.getElementById("f-amount");
+      var pNote = document.getElementById("f-note");
+      var pDate = document.getElementById("f-date");
+      var active = document.activeElement;
+      preservedForm = {
+        amount: pAmt ? pAmt.value : "",
+        note: pNote ? pNote.value : "",
+        date: pDate && pDate.value ? pDate.value : todayISO(),
+        focusedId: active && active.id,
+        selectionStart: active && typeof active.selectionStart === "number" ? active.selectionStart : null,
+        selectionEnd: active && typeof active.selectionEnd === "number" ? active.selectionEnd : null
+      };
+    }
+
     root.innerHTML =
       '<div class="wrap">' +
         '<div class="top-bar">' +
@@ -688,12 +708,30 @@
               : "") +
             '<div class="two-col">' +
               '<label class="field">Note (optional)<input class="input" id="f-note" placeholder="e.g. Groceries at the store" /></label>' +
-              '<label class="field">Date<input class="input" type="date" id="f-date" value="' + todayISO() + '" /></label>' +
+              '<label class="field">Date<input class="input" type="date" id="f-date" value="' + (preservedForm ? preservedForm.date : todayISO()) + '" /></label>' +
             '</div>' +
             '<button type="submit" class="btn-primary">+ Add</button>' +
           '</form>' +
         '</div>' +
       '</div>';
+
+    // Put back whatever the user had typed and which field they were in,
+    // now that the fresh HTML (possibly from a background poll) is in place.
+    if (preservedForm) {
+      var rAmt = document.getElementById("f-amount");
+      var rNote = document.getElementById("f-note");
+      if (rAmt) rAmt.value = preservedForm.amount;
+      if (rNote) rNote.value = preservedForm.note;
+      if (preservedForm.focusedId) {
+        var toFocus = document.getElementById(preservedForm.focusedId);
+        if (toFocus) {
+          toFocus.focus();
+          if (preservedForm.selectionStart !== null && toFocus.setSelectionRange) {
+            try { toFocus.setSelectionRange(preservedForm.selectionStart, preservedForm.selectionEnd); } catch (e) {}
+          }
+        }
+      }
+    }
 
     document.getElementById("logout-btn").onclick = handleLogout;
     document.getElementById("prev-month").onclick = function () { shiftMonth(-1); };

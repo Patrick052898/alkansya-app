@@ -170,7 +170,28 @@
 
   var MONTHS_FIL = ["January","February","March","April","May","June","July","August","September","October","November","December"];
   var INCOME_CATEGORIES = ["Salary","Business","Remittance","Other Income"];
-  var EXPENSE_CATEGORIES = ["Food","Rent/Housing","Electricity","Water","Load/Internet","Transportation","Savings","Debt","Credit Card","Education","Health","Entertainment","Other"];
+  var EXPENSE_CATEGORIES = ["Food","Rent/Housing","Electricity","Water","Load/Internet","Transportation","Savings","Debt","Education","Health","Entertainment","Other"];
+  var CUTOFFS = [
+    { value: "1", label: "1st cut-off (1\u201315)" },
+    { value: "2", label: "2nd cut-off (16\u2013end)" }
+  ];
+  var ADD_CATEGORY_VALUE = "__add_new__";
+
+  function cutoffOfDate(dateStr) {
+    var day = parseInt(String(dateStr || "").slice(8, 10), 10);
+    return (day && day > 15) ? "2" : "1";
+  }
+  function cutoffLabel(value) {
+    var found = CUTOFFS.filter(function (c) { return c.value === value; })[0];
+    return found ? found.label : "";
+  }
+  function customCategories(type) {
+    return (household && household.customCategories && household.customCategories[type]) || [];
+  }
+  function categoriesFor(type) {
+    var base = type === "income" ? INCOME_CATEGORIES : EXPENSE_CATEGORIES;
+    return base.concat(customCategories(type));
+  }
 
   var root = document.getElementById("root");
   var profile = loadProfile(); // {householdCode, viewerId, displayName} | null
@@ -187,15 +208,8 @@
   var activeMonthIdx = now.getMonth();
   var entryType = "expense";
   var entryCategory = EXPENSE_CATEGORIES[0];
-
-  // --- Cutoff / recurring bills state -------------------------------------
-  var viewMode = "monthly"; // 'monthly' | 'cutoff'
-  var activePeriodEnd = null; // Date, set lazily to the current period's end
-  var showCutoffSettings = false;
-  var cutoffDraft = null; // { day1, day2 } while editing settings
-  var newBillDrafts = {}; // billId -> { label, amount } for the "add item" mini-form
-  var oneTimeLabelDraft = "";
-  var autoPosting = false; // guards against overlapping auto-post runs
+  var entryCutoff = cutoffOfDate(new Date().toISOString().slice(0, 10));
+  var activeCutoff = "all"; // 'all' | '1' | '2'
 
   function peso(n) {
     var num = Number(n) || 0;
@@ -203,63 +217,6 @@
   }
   function todayISO() { return new Date().toISOString().slice(0, 10); }
   function monthKey(y, m) { return y + "-" + String(m + 1).padStart(2, "0"); }
-
-  // --- Cutoff period helpers ------------------------------------------------
-  // A "period" is identified by its END date, which always lands on either
-  // cutoff day1 or day2 of some month. E.g. with day1=5, day2=20:
-  //   period ending the 5th  = (prev day2 + 1) .. day1
-  //   period ending the 20th = (day1 + 1)      .. day2
-  function getCutoff() {
-    var c = household && household.settings && household.settings.cutoff;
-    var day1 = (c && c.day1) || 5;
-    var day2 = (c && c.day2) || 20;
-    if (day1 > day2) { var t = day1; day1 = day2; day2 = t; } // keep day1 < day2
-    return { day1: day1, day2: day2 };
-  }
-  function dateOnly(y, m, d) { return new Date(y, m, d, 0, 0, 0, 0); }
-  function periodEndForDate(refDate, day1, day2) {
-    var y = refDate.getFullYear(), m = refDate.getMonth(), d = refDate.getDate();
-    if (d <= day1) return dateOnly(y, m, day1);
-    if (d <= day2) return dateOnly(y, m, day2);
-    return dateOnly(y, m + 1, day1);
-  }
-  function periodStartForEnd(end, day1, day2) {
-    if (end.getDate() === day1) return dateOnly(end.getFullYear(), end.getMonth() - 1, day2 + 1);
-    return dateOnly(end.getFullYear(), end.getMonth(), day1 + 1);
-  }
-  function nextPeriodEnd(end, day1, day2) {
-    if (end.getDate() === day1) return dateOnly(end.getFullYear(), end.getMonth(), day2);
-    return dateOnly(end.getFullYear(), end.getMonth() + 1, day1);
-  }
-  function prevPeriodEnd(end, day1, day2) {
-    if (end.getDate() === day1) return dateOnly(end.getFullYear(), end.getMonth() - 1, day2);
-    return dateOnly(end.getFullYear(), end.getMonth(), day1);
-  }
-  function periodKeyFromEnd(end, day1) {
-    return end.getFullYear() + "-" + String(end.getMonth() + 1).padStart(2, "0") + "-" + (end.getDate() === day1 ? "A" : "B");
-  }
-  function fmtShort(d) { return d.toLocaleDateString("en-PH", { month: "short", day: "numeric" }); }
-  function periodLabel(end, day1, day2) {
-    var start = periodStartForEnd(end, day1, day2);
-    var sameMonth = start.getMonth() === end.getMonth() && start.getFullYear() === end.getFullYear();
-    var startStr = sameMonth ? start.getDate() : fmtShort(start);
-    return startStr + "\u2013" + fmtShort(end) + ", " + end.getFullYear();
-  }
-  function isoDate(d) { return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0"); }
-  function ensureActivePeriod() {
-    if (!activePeriodEnd) {
-      var c = getCutoff();
-      activePeriodEnd = periodEndForDate(new Date(), c.day1, c.day2);
-    }
-  }
-  function shiftPeriod(delta) {
-    ensureActivePeriod();
-    var c = getCutoff();
-    for (var i = 0; i < Math.abs(delta); i++) {
-      activePeriodEnd = delta > 0 ? nextPeriodEnd(activePeriodEnd, c.day1, c.day2) : prevPeriodEnd(activePeriodEnd, c.day1, c.day2);
-    }
-    render();
-  }
   function currentMonthBudgets() {
     var mk = monthKey(activeYear, activeMonthIdx);
     return (household.budgets && household.budgets[mk]) || {};
@@ -349,7 +306,6 @@
       household.__code = code;
       view = "dashboard";
       render();
-      autoPostBills();
     } catch (e) {
       if (!silent) {
         household = null;
@@ -425,180 +381,10 @@
     household.__code = profile.householdCode;
   }
 
-  // --- Recurring & credit card bills --------------------------------------
-  function getRecurringBills() { return (household && household.recurringBills) || []; }
-  function billTotal(bill) {
-    return (bill.items || []).reduce(function (sum, it) { return sum + (Number(it.amount) || 0); }, 0);
-  }
-
-  async function saveCutoff(day1, day2) {
-    var d1 = parseInt(day1, 10), d2 = parseInt(day2, 10);
-    if (!d1 || d1 < 1 || d1 > 31 || !d2 || d2 < 1 || d2 > 31) {
-      showToast("Please enter valid cutoff days (1\u201331)."); return;
-    }
-    if (d1 === d2) { showToast("The two cutoff days must be different."); return; }
-    var lo = Math.min(d1, d2), hi = Math.max(d1, d2);
-    try {
-      await patchHousehold({ settings: Object.assign({}, household.settings || {}, { cutoff: { day1: lo, day2: hi } }) });
-      activePeriodEnd = null; // recompute against the new cutoff
-      showCutoffSettings = false;
-      render();
-      showToast("Cutoff days updated.");
-      autoPostBills();
-    } catch (e) {
-      showToast("Couldn't save cutoff settings — please try again.");
-    }
-  }
-
-  async function addBill(label, recurring) {
-    var bills = getRecurringBills();
-    if (recurring && bills.some(function (b) { return b.label === label; })) {
-      showToast(label + " is already on the list."); return;
-    }
-    var bill = { id: uid(), label: label, recurring: !!recurring, items: [], postedPeriods: [] };
-    var updated = bills.concat([bill]);
-    try {
-      await patchHousehold({ recurringBills: updated });
-      render();
-    } catch (e) {
-      showToast("Couldn't add bill — please try again.");
-    }
-  }
-
-  async function removeBill(billId) {
-    if (!window.confirm("Remove this bill?")) return;
-    var updated = getRecurringBills().filter(function (b) { return b.id !== billId; });
-    try {
-      await patchHousehold({ recurringBills: updated });
-      render();
-    } catch (e) {
-      showToast("Couldn't remove bill — please try again.");
-    }
-  }
-
-  async function addBillItem(billId, label, amountStr) {
-    var amt = parseFloat(amountStr);
-    if (!label || !label.trim()) { showToast("Please enter an item label."); return; }
-    if (!amt || amt <= 0) { showToast("Please enter a valid amount."); return; }
-    var updated = getRecurringBills().map(function (b) {
-      if (b.id !== billId) return b;
-      var items = (b.items || []).concat([{ id: uid(), label: label.trim(), amount: amt }]);
-      return Object.assign({}, b, { items: items });
-    });
-    try {
-      await patchHousehold({ recurringBills: updated });
-      delete newBillDrafts[billId];
-      render();
-    } catch (e) {
-      showToast("Couldn't add item — please try again.");
-    }
-  }
-
-  async function removeBillItem(billId, itemId) {
-    var updated = getRecurringBills().map(function (b) {
-      if (b.id !== billId) return b;
-      return Object.assign({}, b, { items: (b.items || []).filter(function (it) { return it.id !== itemId; }) });
-    });
-    try {
-      await patchHousehold({ recurringBills: updated });
-      render();
-    } catch (e) {
-      showToast("Couldn't remove item — please try again.");
-    }
-  }
-
-  // Runs after every household load. Posts an expense entry for any
-  // recurring bill that hasn't yet posted for the current cutoff period
-  // (catching up on periods missed while the app was closed), and posts
-  // one-time bills exactly once before removing them. Safe to call
-  // repeatedly: postedPeriods makes it idempotent.
-  async function autoPostBills() {
-    if (autoPosting || !household) return;
-    var bills = getRecurringBills();
-    if (!bills.length) return;
-    var c = getCutoff();
-    var nowEnd = periodEndForDate(new Date(), c.day1, c.day2);
-
-    var newEntries = [];
-    var updatedBills = [];
-    var changed = false;
-
-    bills.forEach(function (bill) {
-      var total = billTotal(bill);
-      if (total <= 0) { updatedBills.push(bill); return; }
-
-      if (!bill.recurring) {
-        // One-time bill: post once (if not already posted) then drop it.
-        if ((bill.postedPeriods || []).length === 0) {
-          newEntries.push(makeAutoEntry(bill, total, periodKeyFromEnd(nowEnd, c.day1)));
-          changed = true;
-          return; // not kept in updatedBills — removes itself
-        }
-        return;
-      }
-
-      // Recurring bill: walk forward from the last posted period (or the
-      // current one, if never posted) up to now, posting anything missed.
-      var posted = (bill.postedPeriods || []).slice();
-      var cursor = posted.length ? findEndForKey(posted[posted.length - 1], nowEnd, c) : nowEnd;
-      var toPost = [];
-      var guard = 0;
-      while (cursor <= nowEnd && guard < 36) {
-        var key = periodKeyFromEnd(cursor, c.day1);
-        if (posted.indexOf(key) === -1) toPost.push({ end: cursor, key: key });
-        cursor = nextPeriodEnd(cursor, c.day1, c.day2);
-        guard++;
-      }
-      if (toPost.length) {
-        toPost.forEach(function (p) {
-          newEntries.push(makeAutoEntry(bill, total, p.key));
-          posted.push(p.key);
-        });
-        changed = true;
-      }
-      updatedBills.push(Object.assign({}, bill, { postedPeriods: posted }));
-    });
-
-    if (!changed) return;
-    autoPosting = true;
-    try {
-      await patchHousehold({
-        entries: newEntries.concat(household.entries || []),
-        recurringBills: updatedBills,
-      });
-      render();
-    } catch (e) {
-      // Silent failure is fine here — it will simply retry on next load/poll.
-    } finally {
-      autoPosting = false;
-    }
-  }
-  // Best-effort: given the last posted period's key, find its end Date so we
-  // can resume iterating forward. Falls back to "now" if it can't be parsed.
-  function findEndForKey(key, fallback, c) {
-    var m = /^(\d{4})-(\d{2})-([AB])$/.exec(key || "");
-    if (!m) return fallback;
-    var end = dateOnly(parseInt(m[1], 10), parseInt(m[2], 10) - 1, m[3] === "A" ? c.day1 : c.day2);
-    return nextPeriodEnd(end, c.day1, c.day2);
-  }
-  function makeAutoEntry(bill, total, periodKey) {
-    return {
-      id: uid(),
-      viewerId: profile.viewerId,
-      displayName: profile.displayName,
-      type: "expense",
-      category: "Credit Card",
-      amount: total,
-      note: bill.label + " (auto-posted)",
-      date: todayISO(),
-      autoBillId: bill.id,
-      periodKey: periodKey,
-    };
-  }
-
   async function addEntry(amount, note, date) {
     var amt = parseFloat(amount);
     if (!amt || amt <= 0) { showToast("Please enter a valid amount."); return; }
+    var entryDate = date || todayISO();
     var entry = {
       id: uid(),
       viewerId: profile.viewerId,
@@ -607,7 +393,8 @@
       category: entryCategory,
       amount: amt,
       note: (note || "").trim(),
-      date: date || todayISO(),
+      date: entryDate,
+      cutoff: entryCutoff || cutoffOfDate(entryDate),
     };
     var entries = [entry].concat(household.entries || []);
     try {
@@ -666,6 +453,41 @@
     }
   }
 
+  async function addCategory(type, nameRaw) {
+    var name = (nameRaw || "").trim();
+    if (!name) { showToast("Please enter a category name."); return false; }
+    var builtIn = (type === "income" ? INCOME_CATEGORIES : EXPENSE_CATEGORIES);
+    var existing = categoriesFor(type);
+    if (existing.some(function (c) { return c.toLowerCase() === name.toLowerCase(); })) {
+      showToast("That category already exists.");
+      return false;
+    }
+    var custom = Object.assign({ income: [], expense: [] }, household.customCategories || {});
+    custom[type] = (custom[type] || []).concat([name]);
+    try {
+      await patchHousehold({ customCategories: custom });
+      showToast("Added category \u201c" + name + "\u201d.");
+      return true;
+    } catch (e) {
+      showToast("Couldn't save the category — please try again.");
+      return false;
+    }
+  }
+
+  async function removeCategory(type, name) {
+    if (!window.confirm('Remove category "' + name + '"? Past entries keep it, but it won\u2019t show up for new ones.')) return;
+    var custom = Object.assign({ income: [], expense: [] }, household.customCategories || {});
+    custom[type] = (custom[type] || []).filter(function (c) { return c !== name; });
+    try {
+      await patchHousehold({ customCategories: custom });
+      if (entryCategory === name) entryCategory = categoriesFor(entryType)[0];
+      render();
+      showToast("Category removed.");
+    } catch (e) {
+      showToast("Couldn't remove — please try again.");
+    }
+  }
+
   function shiftMonth(delta) {
     var m = activeMonthIdx + delta, y = activeYear;
     if (m < 0) { m = 11; y -= 1; }
@@ -678,7 +500,9 @@
     var entries = (household && household.entries) || [];
     var monthEntries = entries.filter(function (en) {
       var d = new Date(en.date + "T00:00:00");
-      return d.getFullYear() === activeYear && d.getMonth() === activeMonthIdx;
+      if (d.getFullYear() !== activeYear || d.getMonth() !== activeMonthIdx) return false;
+      if (activeCutoff !== "all" && (en.cutoff || cutoffOfDate(en.date)) !== activeCutoff) return false;
+      return true;
     });
     var income = 0, expense = 0;
     monthEntries.forEach(function (en) {
@@ -703,39 +527,6 @@
     var memberBreakdown = Object.keys(memberMap).map(function (k) { return memberMap[k]; });
 
     return { monthEntries: monthEntries, income: income, expense: expense, balance: income - expense, categoryBreakdown: categoryBreakdown, memberBreakdown: memberBreakdown };
-  }
-
-  // Same shape as computeMonthData, but filters entries into an arbitrary
-  // inclusive date range instead of a calendar month. Used by cutoff view.
-  function computeRangeData(startDate, endDate) {
-    var entries = (household && household.entries) || [];
-    var rangeEntries = entries.filter(function (en) {
-      var d = new Date(en.date + "T00:00:00");
-      return d >= startDate && d <= endDate;
-    });
-    var income = 0, expense = 0;
-    rangeEntries.forEach(function (en) {
-      if (en.type === "income") income += en.amount; else expense += en.amount;
-    });
-    var catMap = {};
-    rangeEntries.filter(function (en) { return en.type === "expense"; }).forEach(function (en) {
-      catMap[en.category] = (catMap[en.category] || 0) + en.amount;
-    });
-    var categoryBreakdown = Object.keys(catMap).map(function (k) { return { category: k, amount: catMap[k] }; })
-      .sort(function (a, b) { return b.amount - a.amount; });
-
-    var memberMap = {};
-    (household.members || []).forEach(function (m) {
-      memberMap[m.id] = { displayName: m.displayName, income: 0, expense: 0 };
-    });
-    rangeEntries.forEach(function (en) {
-      if (!memberMap[en.viewerId]) memberMap[en.viewerId] = { displayName: en.displayName, income: 0, expense: 0 };
-      if (en.type === "income") memberMap[en.viewerId].income += en.amount;
-      else memberMap[en.viewerId].expense += en.amount;
-    });
-    var memberBreakdown = Object.keys(memberMap).map(function (k) { return memberMap[k]; });
-
-    return { monthEntries: rangeEntries, income: income, expense: expense, balance: income - expense, categoryBreakdown: categoryBreakdown, memberBreakdown: memberBreakdown };
   }
 
   function categoryChartSVG(data) {
@@ -803,13 +594,41 @@
     );
   }
 
+  function categoriesSectionHTML() {
+    function colHTML(type, title) {
+      var custom = customCategories(type);
+      var chips = custom.length
+        ? custom.map(function (c) {
+            return '<span style="display:inline-flex;align-items:center;gap:6px;border:1px solid var(--rule);border-radius:12px;padding:3px 10px 3px 12px;font-size:12.5px;margin:0 6px 6px 0">' +
+              esc(c) + '<button type="button" class="btn-icon" style="padding:0" data-rmcat="' + esc(c) + '" data-rmcat-type="' + type + '" title="Remove" aria-label="Remove category">\u2715</button></span>';
+          }).join("")
+        : '<div class="entry-empty" style="margin-bottom:8px">No custom ' + type + ' categories yet.</div>';
+      return (
+        '<div>' +
+          '<div style="font-size:12.5px;font-weight:600;margin-bottom:8px">' + title + '</div>' +
+          '<div style="margin-bottom:8px">' + chips + '</div>' +
+          '<form data-addcat-form="' + type + '" style="display:flex;gap:6px">' +
+            '<input class="input" data-addcat-input="' + type + '" placeholder="New category name" style="flex:1" />' +
+            '<button type="submit" class="btn-ghost">Add</button>' +
+          '</form>' +
+        '</div>'
+      );
+    }
+    return (
+      '<div style="margin-bottom:28px">' +
+        '<div class="section-label">Categories</div>' +
+        '<div class="two-col">' + colHTML("income", "Income") + colHTML("expense", "Expense") + '</div>' +
+      '</div>'
+    );
+  }
+
   function entryRowHTML(en) {
     var canDelete = en.viewerId === profile.viewerId;
     return (
       '<div class="entry-row">' +
         '<div>' +
           '<div style="font-weight:500">' + esc(en.category) + '</div>' +
-          '<div style="color:var(--ink-soft)">' + esc(en.displayName) + ' \u00B7 ' + esc(en.date) + (en.note ? ' \u00B7 ' + esc(en.note) : '') + '</div>' +
+          '<div style="color:var(--ink-soft)">' + esc(en.displayName) + ' \u00B7 ' + esc(en.date) + ' \u00B7 CO' + esc(en.cutoff || cutoffOfDate(en.date)) + (en.note ? ' \u00B7 ' + esc(en.note) : '') + '</div>' +
         '</div>' +
         '<div style="display:flex;align-items:center;gap:8px;flex-shrink:0">' +
           '<div class="num">' + peso(en.amount) + '</div>' +
@@ -890,75 +709,8 @@
     document.getElementById("reset-btn").onclick = handleLogout;
   }
 
-  function billsSectionHTML() {
-    var bills = getRecurringBills();
-    var c = getCutoff();
-    var quickAdds = ["Credit Card 1", "Credit Card 2", "Credit Card 3"]
-      .filter(function (label) { return !bills.some(function (b) { return b.label === label; }); })
-      .map(function (label) {
-        return '<button type="button" class="btn-ghost" data-quickbill="' + esc(label) + '">+ ' + esc(label) + '</button>';
-      }).join("");
-
-    var billRows = bills.map(function (bill) {
-      var total = billTotal(bill);
-      var draft = newBillDrafts[bill.id] || { label: "", amount: "" };
-      var itemRows = (bill.items || []).map(function (it) {
-        return '<div class="entry-row"><div>' + esc(it.label) + '</div><div style="display:flex;align-items:center;gap:8px"><div class="num">' + peso(it.amount) + '</div><button type="button" class="btn-icon" data-rmitem="' + esc(bill.id) + '|' + esc(it.id) + '" title="Remove item" aria-label="Remove item">\u2715</button></div></div>';
-      }).join("") || '<div class="entry-empty">No items yet.</div>';
-      return (
-        '<div style="border:1px solid var(--rule);border-radius:4px;padding:12px 14px;margin-bottom:12px">' +
-          '<div class="budget-row-head">' +
-            '<div style="display:flex;align-items:center;gap:8px">' +
-              '<div style="font-size:13.5px;font-weight:600">' + esc(bill.label) + '</div>' +
-              '<div style="font-size:11px;color:var(--ink-soft);border:1px solid var(--rule);border-radius:3px;padding:1px 6px">' + (bill.recurring ? "Recurring \u00B7 posts each period" : "One-time \u00B7 posts once") + '</div>' +
-            '</div>' +
-            '<div style="display:flex;align-items:center;gap:10px">' +
-              '<div class="num" style="font-weight:700">' + peso(total) + '</div>' +
-              '<button type="button" class="btn-icon" data-rmbill="' + esc(bill.id) + '" title="Remove bill" aria-label="Remove bill">\u2715</button>' +
-            '</div>' +
-          '</div>' +
-          '<div class="entry-list" style="max-height:none;margin-bottom:8px">' + itemRows + '</div>' +
-          '<form class="two-col" data-additem="' + esc(bill.id) + '" style="align-items:end">' +
-            '<label class="field">Item label<input class="input" data-billfield="label" placeholder="e.g. Get together" value="' + esc(draft.label) + '" /></label>' +
-            '<label class="field">Amount (\u20B1)<input class="input" type="number" min="0" step="0.01" data-billfield="amount" placeholder="0.00" value="' + esc(draft.amount) + '" /></label>' +
-            '<button type="submit" class="btn-ghost" style="grid-column:1 / -1">+ Add item</button>' +
-          '</form>' +
-        '</div>'
-      );
-    }).join("");
-
-    return (
-      '<div style="margin-bottom:28px">' +
-        '<div class="section-label">Recurring &amp; credit card bills</div>' +
-        '<div style="font-size:12px;color:var(--ink-soft);margin-bottom:12px">Recurring bills post themselves as an expense automatically once per cutoff period (' + c.day1 + '/' + c.day2 + '). One-time bills post once, then disappear from this list.</div>' +
-        (billRows || '<div class="entry-empty" style="margin-bottom:12px">No bills yet.</div>') +
-        '<div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">' +
-          quickAdds +
-          '<form data-onetimebill="1" style="display:flex;gap:8px;align-items:center">' +
-            '<input class="input" style="width:auto" id="f-onetime-label" placeholder="One-time bill name" value="' + esc(oneTimeLabelDraft) + '" />' +
-            '<button type="submit" class="btn-ghost">+ One-time bill</button>' +
-          '</form>' +
-        '</div>' +
-      '</div>'
-    );
-  }
-
-  function cutoffSettingsHTML() {
-    var c = cutoffDraft || getCutoff();
-    return (
-      '<form id="cutoff-form" class="two-col" style="align-items:end;margin:8px 0 20px;padding:12px 14px;border:1px solid var(--rule);border-radius:4px">' +
-        '<label class="field">1st cutoff day<input class="input" type="number" min="1" max="31" id="f-cutoff-day1" value="' + esc(c.day1) + '" /></label>' +
-        '<label class="field">2nd cutoff day<input class="input" type="number" min="1" max="31" id="f-cutoff-day2" value="' + esc(c.day2) + '" /></label>' +
-        '<button type="submit" class="btn-primary" style="grid-column:1 / -1">Save cutoff days</button>' +
-      '</form>'
-    );
-  }
-
   function renderDashboard() {
-    ensureActivePeriod();
-    var c = getCutoff();
-    var periodStart = periodStartForEnd(activePeriodEnd, c.day1, c.day2);
-    var d = viewMode === "cutoff" ? computeRangeData(periodStart, activePeriodEnd) : computeMonthData();
+    var d = computeMonthData();
     var showMembers = (household.members || []).length > 1;
 
     // Snapshot whatever is currently in the Add-entry form (and which
@@ -994,23 +746,17 @@
           '</div>' +
         '</div>' +
 
-        '<div class="tabs" style="margin-bottom:10px">' +
-          '<button class="tab-btn ' + (viewMode === "monthly" ? "active" : "") + '" id="tab-view-monthly" type="button">Monthly</button>' +
-          '<button class="tab-btn ' + (viewMode === "cutoff" ? "active" : "") + '" id="tab-view-cutoff" type="button">Cutoff</button>' +
-          '<button class="btn-ghost" id="toggle-cutoff-settings" type="button" style="margin-left:auto;border:none;font-size:11.5px">' + (showCutoffSettings ? "Hide" : "Cutoff settings") + '</button>' +
+        '<div class="month-nav">' +
+          '<button class="btn-icon" id="prev-month" aria-label="Previous month">\u2190</button>' +
+          '<div class="num" style="font-size:14px;letter-spacing:0.05em;color:var(--ink-soft)">' + MONTHS_FIL[activeMonthIdx] + ' ' + activeYear + '</div>' +
+          '<button class="btn-icon" id="next-month" aria-label="Next month">\u2192</button>' +
         '</div>' +
-        (showCutoffSettings ? cutoffSettingsHTML() : "") +
-        (viewMode === "cutoff"
-          ? ('<div class="month-nav">' +
-              '<button class="btn-icon" id="prev-period" aria-label="Previous period">\u2190</button>' +
-              '<div class="num" style="font-size:14px;letter-spacing:0.05em;color:var(--ink-soft)">' + esc(periodLabel(activePeriodEnd, c.day1, c.day2)) + '</div>' +
-              '<button class="btn-icon" id="next-period" aria-label="Next period">\u2192</button>' +
-            '</div>')
-          : ('<div class="month-nav">' +
-              '<button class="btn-icon" id="prev-month" aria-label="Previous month">\u2190</button>' +
-              '<div class="num" style="font-size:14px;letter-spacing:0.05em;color:var(--ink-soft)">' + MONTHS_FIL[activeMonthIdx] + ' ' + activeYear + '</div>' +
-              '<button class="btn-icon" id="next-month" aria-label="Next month">\u2192</button>' +
-            '</div>')) +
+        '<div style="display:flex;justify-content:center;gap:6px;margin-bottom:18px">' +
+          ['all', '1', '2'].map(function (v) {
+            var lbl = v === "all" ? "Whole month" : ("CO" + v);
+            return '<button type="button" class="btn-ghost" data-cutoff="' + v + '" style="' + (activeCutoff === v ? "background:var(--ink);color:var(--paper);border-color:var(--ink)" : "") + '">' + lbl + '</button>';
+          }).join("") +
+        '</div>' +
 
         '<div class="balance">' +
           '<div style="font-size:13px;color:var(--ink-soft);margin-bottom:4px">Remaining balance</div>' +
@@ -1024,11 +770,11 @@
 
         budgetSectionHTML(d) +
 
-        billsSectionHTML() +
-
         (d.categoryBreakdown.length
           ? '<div style="margin-bottom:28px"><div class="section-label">Expense breakdown</div><div class="overflow-x">' + categoryChartSVG(d.categoryBreakdown) + '</div></div>'
           : "") +
+
+        categoriesSectionHTML() +
 
         (showMembers
           ? '<div style="margin-bottom:28px"><div class="section-label">Each member\'s contribution</div><div class="overflow-x"><table><thead><tr><th>Member</th><th style="text-align:right">Income</th><th style="text-align:right">Expenses</th></tr></thead><tbody>' +
@@ -1046,11 +792,20 @@
             '</div>' +
             '<div class="two-col">' +
               '<label class="field">Category<select class="input" id="f-category">' +
-                (entryType === "income" ? INCOME_CATEGORIES : EXPENSE_CATEGORIES).map(function (c) {
+                categoriesFor(entryType).map(function (c) {
                   return '<option value="' + esc(c) + '" ' + (c === entryCategory ? "selected" : "") + '>' + esc(c) + '</option>';
                 }).join("") +
+                '<option value="' + ADD_CATEGORY_VALUE + '">+ Add new category\u2026</option>' +
               '</select></label>' +
               '<label class="field">Amount (\u20B1)<input class="input" type="number" min="0" step="0.01" id="f-amount" placeholder="0.00" /></label>' +
+            '</div>' +
+            '<div class="two-col">' +
+              '<label class="field">Cut-off<select class="input" id="f-cutoff">' +
+                CUTOFFS.map(function (c) {
+                  return '<option value="' + c.value + '" ' + (c.value === entryCutoff ? "selected" : "") + '>' + c.label + '</option>';
+                }).join("") +
+              '</select></label>' +
+              '<div></div>' +
             '</div>' +
             (entryType === "expense" && currentMonthBudgets()[entryCategory] !== undefined
               ? (function () {
@@ -1086,59 +841,8 @@
     }
 
     document.getElementById("logout-btn").onclick = handleLogout;
-
-    document.getElementById("tab-view-monthly").onclick = function () { viewMode = "monthly"; render(); };
-    document.getElementById("tab-view-cutoff").onclick = function () { viewMode = "cutoff"; ensureActivePeriod(); render(); };
-    document.getElementById("toggle-cutoff-settings").onclick = function () { showCutoffSettings = !showCutoffSettings; cutoffDraft = null; render(); };
-
-    var cutoffForm = document.getElementById("cutoff-form");
-    if (cutoffForm) {
-      cutoffForm.onsubmit = function (e) {
-        e.preventDefault();
-        saveCutoff(document.getElementById("f-cutoff-day1").value, document.getElementById("f-cutoff-day2").value);
-      };
-    }
-
-    var prevMonthBtn = document.getElementById("prev-month");
-    if (prevMonthBtn) prevMonthBtn.onclick = function () { shiftMonth(-1); };
-    var nextMonthBtn = document.getElementById("next-month");
-    if (nextMonthBtn) nextMonthBtn.onclick = function () { shiftMonth(1); };
-    var prevPeriodBtn = document.getElementById("prev-period");
-    if (prevPeriodBtn) prevPeriodBtn.onclick = function () { shiftPeriod(-1); };
-    var nextPeriodBtn = document.getElementById("next-period");
-    if (nextPeriodBtn) nextPeriodBtn.onclick = function () { shiftPeriod(1); };
-
-    Array.prototype.forEach.call(root.querySelectorAll("[data-quickbill]"), function (btn) {
-      btn.onclick = function () { addBill(btn.getAttribute("data-quickbill"), true); };
-    });
-    var oneTimeForm = root.querySelector('form[data-onetimebill]');
-    if (oneTimeForm) {
-      oneTimeForm.onsubmit = function (e) {
-        e.preventDefault();
-        var label = document.getElementById("f-onetime-label").value.trim();
-        if (!label) { showToast("Please name the one-time bill."); return; }
-        oneTimeLabelDraft = "";
-        addBill(label, false);
-      };
-    }
-    Array.prototype.forEach.call(root.querySelectorAll("[data-additem]"), function (form) {
-      var billId = form.getAttribute("data-additem");
-      form.onsubmit = function (e) {
-        e.preventDefault();
-        var labelInput = form.querySelector('[data-billfield="label"]');
-        var amountInput = form.querySelector('[data-billfield="amount"]');
-        addBillItem(billId, labelInput.value, amountInput.value);
-      };
-    });
-    Array.prototype.forEach.call(root.querySelectorAll("[data-rmitem]"), function (btn) {
-      btn.onclick = function () {
-        var parts = btn.getAttribute("data-rmitem").split("|");
-        removeBillItem(parts[0], parts[1]);
-      };
-    });
-    Array.prototype.forEach.call(root.querySelectorAll("[data-rmbill]"), function (btn) {
-      btn.onclick = function () { removeBill(btn.getAttribute("data-rmbill")); };
-    });
+    document.getElementById("prev-month").onclick = function () { shiftMonth(-1); };
+    document.getElementById("next-month").onclick = function () { shiftMonth(1); };
 
     Array.prototype.forEach.call(document.querySelectorAll('input[name="etype"]'), function (r) {
       r.onchange = function () {
@@ -1147,7 +851,25 @@
         render();
       };
     });
-    document.getElementById("f-category").onchange = function (e) { entryCategory = e.target.value; };
+    document.getElementById("f-category").onchange = function (e) {
+      if (e.target.value === ADD_CATEGORY_VALUE) {
+        var name = window.prompt("New " + entryType + " category name:");
+        addCategory(entryType, name).then(function (ok) {
+          if (ok) entryCategory = name.trim();
+          render();
+        });
+        return;
+      }
+      entryCategory = e.target.value;
+    };
+    document.getElementById("f-cutoff").onchange = function (e) { entryCutoff = e.target.value; };
+    var fDate = document.getElementById("f-date");
+    if (fDate) {
+      fDate.onchange = function (e) {
+        entryCutoff = cutoffOfDate(e.target.value);
+        render();
+      };
+    }
 
     document.getElementById("entry-form").onsubmit = function (e) {
       e.preventDefault();
@@ -1159,6 +881,26 @@
         document.getElementById("f-note").value = "";
       });
     };
+
+    Array.prototype.forEach.call(root.querySelectorAll("[data-cutoff]"), function (btn) {
+      btn.onclick = function () { activeCutoff = btn.getAttribute("data-cutoff"); render(); };
+    });
+
+    Array.prototype.forEach.call(root.querySelectorAll("[data-rmcat]"), function (btn) {
+      btn.onclick = function () {
+        removeCategory(btn.getAttribute("data-rmcat-type"), btn.getAttribute("data-rmcat"));
+      };
+    });
+    Array.prototype.forEach.call(root.querySelectorAll("[data-addcat-form]"), function (form) {
+      form.onsubmit = function (e) {
+        e.preventDefault();
+        var type = form.getAttribute("data-addcat-form");
+        var input = form.querySelector("[data-addcat-input]");
+        addCategory(type, input.value).then(function (ok) {
+          if (ok) render();
+        });
+      };
+    });
 
     Array.prototype.forEach.call(root.querySelectorAll("[data-del]"), function (btn) {
       btn.onclick = function () { deleteEntry(btn.getAttribute("data-del"), btn.getAttribute("data-owner")); };

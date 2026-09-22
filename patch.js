@@ -1,370 +1,74 @@
 #!/usr/bin/env node
-/*
- * patch-alkansya-mongo.js
+/**
+ * patch.js — installs the two-cutoff (e.g. 5th & 20th) + recurring/credit-card
+ * bills feature into server.js and your index.html (checked in public/ first,
+ * then the current folder).
  *
- * Fixes: households disappearing / "resetting" after a while on Render.
+ * Run it with:   node patch.js
  *
- * Cause: server.js stores all data in data/households.json on local disk.
- * Render's free (and even paid, without a disk) web services have an
- * EPHEMERAL filesystem - every restart, redeploy, or spin-down wipes it.
- * When the file comes back empty, GET /api/households/:code 404s and the
- * browser (correctly) drops you back to the setup screen. No amount of
- * frontend patching fixes this; the data has to live somewhere durable.
+ * How it works: this is a full-file replacement, the same pattern your
+ * project already uses. For each target file it:
+ *   1. Skips it if it is missing.
+ *   2. Skips it if its content already matches the patched version exactly
+ *      (so re-running is always safe and a no-op the second time).
+ *   3. Otherwise makes a one-time backup as <file>.bak (never overwrites an
+ *      existing .bak, so your original is preserved even across re-runs),
+ *      then writes the patched file.
+ * Nothing is edited in place / line-by-line, so there is no risk of a
+ * partial or corrupted patch.
  *
- * What this does:
- *   - Rewrites server.js to store households in MongoDB Atlas via the
- *     official `mongodb` driver, when MONGODB_URI is set.
- *   - Every API route (POST /api/households, POST /:code/join,
- *     GET /:code, PATCH /:code) keeps the exact same URL, request body,
- *     and response shape - your index.html needs zero changes.
- *   - If MONGODB_URI is NOT set, or the connection fails at boot, it falls
- *     back to the original households.json file automatically, so local
- *     development with no setup still works exactly like before.
- *   - Adds the `mongodb` package to package.json and installs it.
- *
- * Usage:
- *   node patch-alkansya-mongo.js                 (auto-finds server.js)
- *   node patch-alkansya-mongo.js path/to/server.js
- *
- * After patching, set MONGODB_URI as an environment variable in Render
- * (Dashboard -> your service -> Environment) to your Atlas connection
- * string, e.g.:
- *   mongodb+srv://user:password@cluster0.xxxxx.mongodb.net/alkansya
- *
- * Safe to run more than once. Writes a .bak before changing anything.
+ * What you get after running this:
+ *   - Household settings gain a two-cutoff schedule (default: 5th & 20th of
+ *     the month, editable from the dashboard's "Cutoff settings" link).
+ *   - The dashboard gets a Monthly / Cutoff view toggle.
+ *   - A "Recurring & credit card bills" section: quick-add Credit Card 1/2/3
+ *     (recurring) or a one-time bill, each itemized with label + amount rows
+ *     that sum to a total (matches your "7,000 + 1,000 = 8,000" example).
+ *   - Auto-posting: recurring bills post themselves as an expense once per
+ *     cutoff period automatically (no button, and it catches up on any
+ *     periods missed while the app was closed); one-time bills post exactly
+ *     once, then remove themselves from the list.
  */
-
 const fs = require("fs");
-const path = require("path");
-const { execSync } = require("child_process");
 
-const NEW_SERVER = `const express = require("express");
-const fs = require("fs");
-const path = require("path");
-const crypto = require("crypto");
-const { MongoClient } = require("mongodb");
+const FILES = [
+  { path: "server.js", content: "const express = require(\"express\");\nconst fs = require(\"fs\");\nconst path = require(\"path\");\nconst crypto = require(\"crypto\");\nconst { MongoClient } = require(\"mongodb\");\n\nconst PORT = process.env.PORT || 3000;\nconst MONGODB_URI = process.env.MONGODB_URI || \"\";\nconst DATA_DIR = path.join(__dirname, \"data\");\nconst DATA_FILE = path.join(DATA_DIR, \"households.json\");\n\n// ---------------------------------------------------------------------------\n// Storage layer. Two implementations behind the same small interface,\n// selected once at boot depending on whether MONGODB_URI is set. Everything\n// below this block (the routes) is unaware of which backend is active.\n//\n// Render's free web services wipe the local filesystem on every restart,\n// redeploy, or spin-down - that's why households were disappearing. Mongo\n// Atlas lives outside that filesystem, so data survives restarts.\n// ---------------------------------------------------------------------------\n\nlet store; // resolved to one of the two implementations below\n\nfunction makeFileStore() {\n  if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });\n  if (!fs.existsSync(DATA_FILE)) fs.writeFileSync(DATA_FILE, JSON.stringify({}), \"utf8\");\n\n  function readAll() {\n    try {\n      return JSON.parse(fs.readFileSync(DATA_FILE, \"utf8\"));\n    } catch (e) {\n      return {};\n    }\n  }\n  function writeAll(all) {\n    fs.writeFileSync(DATA_FILE, JSON.stringify(all, null, 2), \"utf8\");\n  }\n\n  return {\n    kind: \"file\",\n    async init() {},\n    async getHousehold(code) {\n      const all = readAll();\n      return all[code] || null;\n    },\n    async codeExists(code) {\n      const all = readAll();\n      return Boolean(all[code]);\n    },\n    async createHousehold(household) {\n      const all = readAll();\n      all[household.code] = household;\n      writeAll(all);\n    },\n    async saveHousehold(household) {\n      const all = readAll();\n      all[household.code] = household;\n      writeAll(all);\n    },\n  };\n}\n\nfunction makeMongoStore(uri) {\n  const client = new MongoClient(uri, { serverSelectionTimeoutMS: 8000 });\n  let households; // collection handle, set in init()\n\n  return {\n    kind: \"mongo\",\n    async init() {\n      await client.connect();\n      // Database name comes from MONGODB_DB if set, else this default.\n      // (If your connection string already ends in /somedb, that name is\n      // used automatically by the driver and MONGODB_DB is ignored.)\n      const db = client.db(process.env.MONGODB_DB || \"alkansya\");\n      households = db.collection(\"households\");\n      await households.createIndex({ code: 1 }, { unique: true });\n    },\n    async getHousehold(code) {\n      return households.findOne({ code }, { projection: { _id: 0 } });\n    },\n    async codeExists(code) {\n      const doc = await households.findOne({ code }, { projection: { _id: 1 } });\n      return Boolean(doc);\n    },\n    async createHousehold(household) {\n      await households.insertOne(household);\n    },\n    async saveHousehold(household) {\n      await households.replaceOne({ code: household.code }, household, { upsert: true });\n    },\n  };\n}\n\nfunction uid() {\n  return crypto.randomBytes(6).toString(\"hex\");\n}\n\nasync function genCode(name) {\n  const base = (name || \"PAM\")\n    .toUpperCase()\n    .replace(/[^A-Z0-9]/g, \"\")\n    .slice(0, 4)\n    .padEnd(4, \"X\");\n  let code;\n  let tries = 0;\n  do {\n    const rand = Math.floor(100 + Math.random() * 900);\n    code = base + \"-\" + rand;\n    tries++;\n  } while ((await store.codeExists(code)) && tries < 20);\n  return code;\n}\n\nconst app = express();\napp.use(express.json());\napp.use(express.static(path.join(__dirname, \"public\")));\n\n// Create a new household. Body: { householdName, displayName }\napp.post(\"/api/households\", async (req, res) => {\n  try {\n    const { householdName, displayName } = req.body || {};\n    if (!householdName || !householdName.trim()) {\n      return res.status(400).json({ error: \"Household name is required.\" });\n    }\n    if (!displayName || !displayName.trim()) {\n      return res.status(400).json({ error: \"Your name is required.\" });\n    }\n    const code = await genCode(householdName);\n    const viewerId = uid();\n    const household = {\n      code,\n      name: householdName.trim(),\n      members: [{ id: viewerId, displayName: displayName.trim() }],\n      entries: [],\n      budgets: {},\n      recurringBills: [],\n      settings: { cutoff: { day1: 5, day2: 20 } },\n    };\n    await store.createHousehold(household);\n    res.json({ code, viewerId, household });\n  } catch (e) {\n    console.error(\"POST /api/households failed:\", e);\n    res.status(500).json({ error: \"server_error\" });\n  }\n});\n\n// Join an existing household. Body: { displayName }\napp.post(\"/api/households/:code/join\", async (req, res) => {\n  try {\n    const code = req.params.code.toUpperCase();\n    const { displayName } = req.body || {};\n    if (!displayName || !displayName.trim()) {\n      return res.status(400).json({ error: \"Your name is required.\" });\n    }\n    const household = await store.getHousehold(code);\n    if (!household) {\n      return res.status(404).json({ error: \"not_found\" });\n    }\n    const viewerId = uid();\n    household.members.push({ id: viewerId, displayName: displayName.trim() });\n    await store.saveHousehold(household);\n    res.json({ code, viewerId, household });\n  } catch (e) {\n    console.error(\"POST /api/households/:code/join failed:\", e);\n    res.status(500).json({ error: \"server_error\" });\n  }\n});\n\n// Fetch a household (used on load and by polling for live-ish updates)\napp.get(\"/api/households/:code\", async (req, res) => {\n  try {\n    const code = req.params.code.toUpperCase();\n    const household = await store.getHousehold(code);\n    if (!household) return res.status(404).json({ error: \"not_found\" });\n    res.json({ household });\n  } catch (e) {\n    console.error(\"GET /api/households/:code failed:\", e);\n    res.status(500).json({ error: \"server_error\" });\n  }\n});\n\n// Partial update: body may include entries, budgets, and/or members\napp.patch(\"/api/households/:code\", async (req, res) => {\n  try {\n    const code = req.params.code.toUpperCase();\n    const household = await store.getHousehold(code);\n    if (!household) return res.status(404).json({ error: \"not_found\" });\n\n    const { entries, budgets, members, recurringBills, settings } = req.body || {};\n    if (entries !== undefined) household.entries = entries;\n    if (budgets !== undefined) household.budgets = budgets;\n    if (members !== undefined) household.members = members;\n    if (recurringBills !== undefined) household.recurringBills = recurringBills;\n    if (settings !== undefined) household.settings = settings;\n\n    await store.saveHousehold(household);\n    res.json({ household });\n  } catch (e) {\n    console.error(\"PATCH /api/households/:code failed:\", e);\n    res.status(500).json({ error: \"server_error\" });\n  }\n});\n\nasync function start() {\n  store = MONGODB_URI ? makeMongoStore(MONGODB_URI) : makeFileStore();\n  try {\n    await store.init();\n  } catch (e) {\n    console.error(\"Storage init failed (\" + store.kind + \"):\", e.message);\n    if (store.kind === \"mongo\") {\n      console.error(\"Falling back to the local JSON file for this run. Fix MONGODB_URI to persist data.\");\n      store = makeFileStore();\n      await store.init();\n    } else {\n      throw e;\n    }\n  }\n  app.listen(PORT, () => {\n    console.log(\"Alkansya running on port \" + PORT + \" (storage: \" + store.kind + \")\");\n  });\n}\n\nstart();\n" },
+  { path: findIndexHtmlPath(), content: "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"UTF-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n<title>Alkansya</title>\n<link rel=\"stylesheet\" href=\"https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,700&family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap\">\n<style>\n  :root {\n    --paper: #F6EFDD;\n    --paper-raised: #FBF6EA;\n    --ink: #1F2E23;\n    --ink-soft: #5B6A5E;\n    --rule: #C9BBA0;\n    --income: #2F6B4F;\n    --expense: #A2452D;\n    --gold: #C98A2B;\n    --shadow: rgba(31, 46, 35, 0.12);\n  }\n  @media (prefers-color-scheme: dark) {\n    :root:not([data-theme=\"light\"]) {\n      --paper: #17201A;\n      --paper-raised: #1D271F;\n      --ink: #EDE6D6;\n      --ink-soft: #9CA9A0;\n      --rule: #3B473D;\n      --income: #6FBE95;\n      --expense: #E0876A;\n      --gold: #E0B15C;\n      --shadow: rgba(0, 0, 0, 0.4);\n    }\n  }\n  :root[data-theme=\"dark\"] {\n    --paper: #17201A;\n    --paper-raised: #1D271F;\n    --ink: #EDE6D6;\n    --ink-soft: #9CA9A0;\n    --rule: #3B473D;\n    --income: #6FBE95;\n    --expense: #E0876A;\n    --gold: #E0B15C;\n    --shadow: rgba(0, 0, 0, 0.4);\n  }\n\n  * { box-sizing: border-box; }\n  body {\n    margin: 0;\n    background: var(--paper);\n    color: var(--ink);\n    font-family: \"IBM Plex Sans\", sans-serif;\n    -webkit-font-smoothing: antialiased;\n  }\n  .num { font-family: \"Space Grotesk\", monospace; font-variant-numeric: tabular-nums; }\n  .serif { font-family: \"Fraunces\", serif; }\n  input, select, button { font-family: inherit; color: inherit; }\n  input:focus, select:focus, button:focus-visible {\n    outline: 2px solid var(--gold);\n    outline-offset: 1px;\n  }\n  ::placeholder { color: var(--ink-soft); opacity: 0.7; }\n\n  .wrap { max-width: 900px; margin: 0 auto; padding: 28px 20px 90px; }\n  .field { display: flex; flex-direction: column; gap: 5px; font-size: 12px; color: var(--ink-soft); }\n  .input {\n    padding: 10px 12px;\n    border: 1px solid var(--rule);\n    border-radius: 3px;\n    font-size: 14.5px;\n    background: var(--paper-raised);\n    color: var(--ink);\n    width: 100%;\n  }\n  .btn-primary {\n    background: var(--ink);\n    color: var(--paper);\n    border: none;\n    border-radius: 3px;\n    padding: 12px 16px;\n    font-size: 14.5px;\n    font-weight: 600;\n    cursor: pointer;\n  }\n  .btn-primary:disabled { opacity: 0.6; cursor: default; }\n  .btn-ghost {\n    background: none;\n    border: 1px solid var(--rule);\n    border-radius: 3px;\n    padding: 7px 13px;\n    font-size: 12.5px;\n    color: var(--ink);\n    cursor: pointer;\n  }\n  .btn-icon { background: none; border: none; cursor: pointer; color: var(--ink-soft); padding: 4px; }\n  .section-label {\n    font-size: 13px; font-weight: 600; margin-bottom: 10px;\n    border-bottom: 1px solid var(--rule); padding-bottom: 6px;\n  }\n  .toast {\n    position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);\n    background: var(--ink); color: var(--paper); padding: 10px 18px;\n    border-radius: 4px; font-size: 13px; box-shadow: 0 8px 24px var(--shadow);\n    max-width: 90vw; text-align: center; z-index: 50;\n  }\n  .overflow-x { overflow-x: auto; -webkit-overflow-scrolling: touch; }\n\n  /* auth screen */\n  .auth-shell { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 32px 16px; }\n  .auth-card { width: 100%; max-width: 420px; }\n  .tabs { display: flex; gap: 20px; margin-bottom: 20px; border-bottom: 1px solid var(--rule); }\n  .tab-btn {\n    background: none; border: none; cursor: pointer; padding: 8px 0 10px;\n    font-size: 14px; font-weight: 600; color: var(--ink-soft);\n    border-bottom: 2px solid transparent;\n  }\n  .tab-btn.active { color: var(--ink); border-bottom-color: var(--ink); }\n  .err { color: var(--expense); font-size: 13px; margin-bottom: 14px; }\n  .radio-row { display: flex; gap: 16px; margin-bottom: 10px; font-size: 13px; }\n  .radio-row label { display: flex; align-items: center; gap: 6px; cursor: pointer; }\n  form { display: flex; flex-direction: column; gap: 14px; }\n\n  /* dashboard */\n  .top-bar {\n    display: flex; justify-content: space-between; align-items: flex-start;\n    flex-wrap: wrap; gap: 12px; border-bottom: 2px solid var(--ink);\n    padding-bottom: 16px; margin-bottom: 20px;\n  }\n  .code-chip {\n    font-size: 12px; letter-spacing: 0.04em; color: var(--gold);\n    border: 1px solid var(--gold); padding: 4px 10px; border-radius: 3px;\n  }\n  .month-nav { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }\n  .balance { text-align: center; margin: 10px 0 28px; }\n  .balance .amt { font-weight: 700; font-size: 44px; }\n  .ledger-grid {\n    display: grid; grid-template-columns: 1fr 1fr;\n    border: 1px solid var(--rule); margin-bottom: 28px;\n  }\n  .ledger-col { padding: 16px 18px; }\n  .ledger-col.left { border-right: 1px solid var(--rule); }\n  .ledger-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 10px; }\n  .entry-list { display: flex; flex-direction: column; gap: 8px; max-height: 260px; overflow-y: auto; }\n  .entry-row { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; font-size: 12.5px; border-bottom: 1px dotted var(--rule); padding-bottom: 6px; }\n  .entry-empty { font-size: 12px; color: var(--ink-soft); font-style: italic; }\n  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }\n  table { width: 100%; border-collapse: collapse; font-size: 13px; }\n  th { text-align: left; padding: 6px 8px; font-size: 12px; color: var(--ink-soft); font-weight: 600; border-bottom: 1px solid var(--rule); }\n  td { padding: 8px 8px; border-bottom: 1px solid var(--rule); }\n  .disclaimer { margin-top: 22px; font-size: 12px; color: var(--ink-soft); line-height: 1.5; }\n  .budget-row { margin-bottom: 14px; }\n  .budget-row-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 4px; gap: 8px; }\n  .budget-bar-track { height: 6px; background: var(--rule); border-radius: 3px; overflow: hidden; }\n  .budget-bar-fill { height: 100%; border-radius: 3px; }\n  .budget-note { font-size: 11.5px; margin-top: 3px; }\n  .budget-hint { font-size: 12px; color: var(--ink-soft); margin: -4px 0 0; }\n\n  @media (max-width: 640px) {\n    .ledger-grid { grid-template-columns: 1fr !important; }\n    .ledger-col.left { border-right: none !important; border-bottom: 1px solid var(--rule); }\n    .two-col { grid-template-columns: 1fr !important; }\n    .balance .amt { font-size: 36px; }\n  }\n</style>\n</head>\n<body>\n<div id=\"root\"></div>\n\n<script>\n(function () {\n  \"use strict\";\n\n  var MONTHS_FIL = [\"January\",\"February\",\"March\",\"April\",\"May\",\"June\",\"July\",\"August\",\"September\",\"October\",\"November\",\"December\"];\n  var INCOME_CATEGORIES = [\"Salary\",\"Business\",\"Remittance\",\"Other Income\"];\n  var EXPENSE_CATEGORIES = [\"Food\",\"Rent/Housing\",\"Electricity\",\"Water\",\"Load/Internet\",\"Transportation\",\"Savings\",\"Debt\",\"Credit Card\",\"Education\",\"Health\",\"Entertainment\",\"Other\"];\n\n  var root = document.getElementById(\"root\");\n  var profile = loadProfile(); // {householdCode, viewerId, displayName} | null\n  var household = null; // live doc data\n  var view = \"loading\"; // 'loading' | 'setup' | 'dashboard'\n  var authMode = \"create\"; // 'create' | 'join'\n  var authError = \"\";\n  var busy = false;\n  var toastMsg = \"\";\n  var toastTimer = null;\n\n  var now = new Date();\n  var activeYear = now.getFullYear();\n  var activeMonthIdx = now.getMonth();\n  var entryType = \"expense\";\n  var entryCategory = EXPENSE_CATEGORIES[0];\n\n  // --- Cutoff / recurring bills state -------------------------------------\n  var viewMode = \"monthly\"; // 'monthly' | 'cutoff'\n  var activePeriodEnd = null; // Date, set lazily to the current period's end\n  var showCutoffSettings = false;\n  var cutoffDraft = null; // { day1, day2 } while editing settings\n  var newBillDrafts = {}; // billId -> { label, amount } for the \"add item\" mini-form\n  var oneTimeLabelDraft = \"\";\n  var autoPosting = false; // guards against overlapping auto-post runs\n\n  function peso(n) {\n    var num = Number(n) || 0;\n    return \"\\u20B1\" + num.toLocaleString(\"en-PH\", { minimumFractionDigits: 2, maximumFractionDigits: 2 });\n  }\n  function todayISO() { return new Date().toISOString().slice(0, 10); }\n  function monthKey(y, m) { return y + \"-\" + String(m + 1).padStart(2, \"0\"); }\n\n  // --- Cutoff period helpers ------------------------------------------------\n  // A \"period\" is identified by its END date, which always lands on either\n  // cutoff day1 or day2 of some month. E.g. with day1=5, day2=20:\n  //   period ending the 5th  = (prev day2 + 1) .. day1\n  //   period ending the 20th = (day1 + 1)      .. day2\n  function getCutoff() {\n    var c = household && household.settings && household.settings.cutoff;\n    var day1 = (c && c.day1) || 5;\n    var day2 = (c && c.day2) || 20;\n    if (day1 > day2) { var t = day1; day1 = day2; day2 = t; } // keep day1 < day2\n    return { day1: day1, day2: day2 };\n  }\n  function dateOnly(y, m, d) { return new Date(y, m, d, 0, 0, 0, 0); }\n  function periodEndForDate(refDate, day1, day2) {\n    var y = refDate.getFullYear(), m = refDate.getMonth(), d = refDate.getDate();\n    if (d <= day1) return dateOnly(y, m, day1);\n    if (d <= day2) return dateOnly(y, m, day2);\n    return dateOnly(y, m + 1, day1);\n  }\n  function periodStartForEnd(end, day1, day2) {\n    if (end.getDate() === day1) return dateOnly(end.getFullYear(), end.getMonth() - 1, day2 + 1);\n    return dateOnly(end.getFullYear(), end.getMonth(), day1 + 1);\n  }\n  function nextPeriodEnd(end, day1, day2) {\n    if (end.getDate() === day1) return dateOnly(end.getFullYear(), end.getMonth(), day2);\n    return dateOnly(end.getFullYear(), end.getMonth() + 1, day1);\n  }\n  function prevPeriodEnd(end, day1, day2) {\n    if (end.getDate() === day1) return dateOnly(end.getFullYear(), end.getMonth() - 1, day2);\n    return dateOnly(end.getFullYear(), end.getMonth(), day1);\n  }\n  function periodKeyFromEnd(end, day1) {\n    return end.getFullYear() + \"-\" + String(end.getMonth() + 1).padStart(2, \"0\") + \"-\" + (end.getDate() === day1 ? \"A\" : \"B\");\n  }\n  function fmtShort(d) { return d.toLocaleDateString(\"en-PH\", { month: \"short\", day: \"numeric\" }); }\n  function periodLabel(end, day1, day2) {\n    var start = periodStartForEnd(end, day1, day2);\n    var sameMonth = start.getMonth() === end.getMonth() && start.getFullYear() === end.getFullYear();\n    var startStr = sameMonth ? start.getDate() : fmtShort(start);\n    return startStr + \"\\u2013\" + fmtShort(end) + \", \" + end.getFullYear();\n  }\n  function isoDate(d) { return d.getFullYear() + \"-\" + String(d.getMonth() + 1).padStart(2, \"0\") + \"-\" + String(d.getDate()).padStart(2, \"0\"); }\n  function ensureActivePeriod() {\n    if (!activePeriodEnd) {\n      var c = getCutoff();\n      activePeriodEnd = periodEndForDate(new Date(), c.day1, c.day2);\n    }\n  }\n  function shiftPeriod(delta) {\n    ensureActivePeriod();\n    var c = getCutoff();\n    for (var i = 0; i < Math.abs(delta); i++) {\n      activePeriodEnd = delta > 0 ? nextPeriodEnd(activePeriodEnd, c.day1, c.day2) : prevPeriodEnd(activePeriodEnd, c.day1, c.day2);\n    }\n    render();\n  }\n  function currentMonthBudgets() {\n    var mk = monthKey(activeYear, activeMonthIdx);\n    return (household.budgets && household.budgets[mk]) || {};\n  }\n  function esc(s) {\n    return String(s == null ? \"\" : s).replace(/[&<>\"']/g, function (c) {\n      return { \"&\": \"&amp;\", \"<\": \"&lt;\", \">\": \"&gt;\", '\"': \"&quot;\", \"'\": \"&#39;\" }[c];\n    });\n  }\n  function uid() { return Math.random().toString(36).slice(2, 10) + Date.now().toString(36); }\n\n  function loadProfile() {\n    try {\n      var raw = localStorage.getItem(\"alkansya_profile\");\n      return raw ? JSON.parse(raw) : null;\n    } catch (e) { return null; }\n  }\n  function saveProfile(p) {\n    profile = p;\n    try { localStorage.setItem(\"alkansya_profile\", JSON.stringify(p)); } catch (e) {}\n  }\n  function clearProfile() {\n    profile = null;\n    try { localStorage.removeItem(\"alkansya_profile\"); } catch (e) {}\n  }\n\n  function showToast(msg) {\n    toastMsg = msg;\n    render();\n    if (toastTimer) clearTimeout(toastTimer);\n    toastTimer = setTimeout(function () { toastMsg = \"\"; render(); }, 2800);\n  }\n\n  function genCode(name) {\n    var base = (name || \"PAM\").toUpperCase().replace(/[^A-Z0-9]/g, \"\").slice(0, 4);\n    while (base.length < 4) base += \"X\";\n    var rand = Math.floor(100 + Math.random() * 900);\n    return base + \"-\" + rand;\n  }\n\n  var pollTimer = null;\n  var API = \"/api\";\n\n  async function apiCall(path, opts) {\n    var res;\n    try {\n      res = await fetch(API + path, Object.assign({\n        headers: { \"Content-Type\": \"application/json\" }\n      }, opts || {}));\n    } catch (e) {\n      throw new Error(\"network_error\");\n    }\n    var body = null;\n    try { body = await res.json(); } catch (e) {}\n    if (!res.ok) {\n      var msg = (body && body.error) || (!body ? \"server_unreachable\" : (\"HTTP \" + res.status));\n      throw new Error(msg);\n    }\n    return body;\n  }\n\n  async function initDb() {\n    if (profile && profile.householdCode) {\n      subscribeHousehold(profile.householdCode);\n    } else {\n      view = \"setup\";\n      render();\n    }\n  }\n\n  function subscribeHousehold(code) {\n    view = \"loading\";\n    render();\n    stopPolling();\n    loadHouseholdOnce(code);\n    pollTimer = setInterval(function () { loadHouseholdOnce(code, true); }, 4000);\n  }\n\n  function stopPolling() {\n    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }\n  }\n\n  async function loadHouseholdOnce(code, silent) {\n    try {\n      var body = await apiCall(\"/households/\" + encodeURIComponent(code));\n      household = body.household;\n      household.__code = code;\n      view = \"dashboard\";\n      render();\n      autoPostBills();\n    } catch (e) {\n      if (!silent) {\n        household = null;\n        view = \"missing-household\";\n        render();\n      }\n    }\n  }\n\n  async function handleCreate(name, displayName) {\n    authError = \"\";\n    if (!name.trim()) { authError = \"Please name your household.\"; render(); return; }\n    if (!displayName.trim()) { authError = \"Please enter your name.\"; render(); return; }\n    busy = true; render();\n    try {\n      var body = await apiCall(\"/households\", {\n        method: \"POST\",\n        body: JSON.stringify({ householdName: name.trim(), displayName: displayName.trim() })\n      });\n      saveProfile({ householdCode: body.code, viewerId: body.viewerId, displayName: displayName.trim() });\n      busy = false;\n      subscribeHousehold(body.code);\n      showToast(\"Household created!\");\n    } catch (e) {\n      busy = false;\n      authError = (e.message === \"server_unreachable\" || e.message === \"network_error\")\n        ? \"Can't reach the server. Make sure the app's backend is running (npm start), then reload the page.\"\n        : \"Something went wrong creating the household. Please try again.\";\n      render();\n    }\n  }\n\n  async function handleJoin(codeInput, displayName) {\n    authError = \"\";\n    var code = codeInput.trim().toUpperCase();\n    if (!code) { authError = \"Please enter the household code.\"; render(); return; }\n    if (!displayName.trim()) { authError = \"Please enter your name.\"; render(); return; }\n    busy = true; render();\n    try {\n      var body = await apiCall(\"/households/\" + encodeURIComponent(code) + \"/join\", {\n        method: \"POST\",\n        body: JSON.stringify({ displayName: displayName.trim() })\n      });\n      saveProfile({ householdCode: code, viewerId: body.viewerId, displayName: displayName.trim() });\n      busy = false;\n      subscribeHousehold(code);\n      showToast(\"Joined \" + body.household.name + \"!\");\n    } catch (e) {\n      busy = false;\n      authError = e.message === \"not_found\"\n        ? 'No household found with that code \"' + esc(code) + '\".'\n        : (e.message === \"server_unreachable\" || e.message === \"network_error\")\n          ? \"Can't reach the server. Make sure the app's backend is running (npm start), then reload the page.\"\n          : \"Something went wrong joining. Please try again.\";\n      render();\n    }\n  }\n\n  function handleLogout() {\n    stopPolling();\n    clearProfile();\n    household = null;\n    view = \"setup\";\n    render();\n  }\n\n  async function patchHousehold(fields) {\n    var body = await apiCall(\"/households/\" + encodeURIComponent(profile.householdCode), {\n      method: \"PATCH\",\n      body: JSON.stringify(fields)\n    });\n    household = body.household;\n    household.__code = profile.householdCode;\n  }\n\n  // --- Recurring & credit card bills --------------------------------------\n  function getRecurringBills() { return (household && household.recurringBills) || []; }\n  function billTotal(bill) {\n    return (bill.items || []).reduce(function (sum, it) { return sum + (Number(it.amount) || 0); }, 0);\n  }\n\n  async function saveCutoff(day1, day2) {\n    var d1 = parseInt(day1, 10), d2 = parseInt(day2, 10);\n    if (!d1 || d1 < 1 || d1 > 31 || !d2 || d2 < 1 || d2 > 31) {\n      showToast(\"Please enter valid cutoff days (1\\u201331).\"); return;\n    }\n    if (d1 === d2) { showToast(\"The two cutoff days must be different.\"); return; }\n    var lo = Math.min(d1, d2), hi = Math.max(d1, d2);\n    try {\n      await patchHousehold({ settings: Object.assign({}, household.settings || {}, { cutoff: { day1: lo, day2: hi } }) });\n      activePeriodEnd = null; // recompute against the new cutoff\n      showCutoffSettings = false;\n      render();\n      showToast(\"Cutoff days updated.\");\n      autoPostBills();\n    } catch (e) {\n      showToast(\"Couldn't save cutoff settings — please try again.\");\n    }\n  }\n\n  async function addBill(label, recurring) {\n    var bills = getRecurringBills();\n    if (recurring && bills.some(function (b) { return b.label === label; })) {\n      showToast(label + \" is already on the list.\"); return;\n    }\n    var bill = { id: uid(), label: label, recurring: !!recurring, items: [], postedPeriods: [] };\n    var updated = bills.concat([bill]);\n    try {\n      await patchHousehold({ recurringBills: updated });\n      render();\n    } catch (e) {\n      showToast(\"Couldn't add bill — please try again.\");\n    }\n  }\n\n  async function removeBill(billId) {\n    if (!window.confirm(\"Remove this bill?\")) return;\n    var updated = getRecurringBills().filter(function (b) { return b.id !== billId; });\n    try {\n      await patchHousehold({ recurringBills: updated });\n      render();\n    } catch (e) {\n      showToast(\"Couldn't remove bill — please try again.\");\n    }\n  }\n\n  async function addBillItem(billId, label, amountStr) {\n    var amt = parseFloat(amountStr);\n    if (!label || !label.trim()) { showToast(\"Please enter an item label.\"); return; }\n    if (!amt || amt <= 0) { showToast(\"Please enter a valid amount.\"); return; }\n    var updated = getRecurringBills().map(function (b) {\n      if (b.id !== billId) return b;\n      var items = (b.items || []).concat([{ id: uid(), label: label.trim(), amount: amt }]);\n      return Object.assign({}, b, { items: items });\n    });\n    try {\n      await patchHousehold({ recurringBills: updated });\n      delete newBillDrafts[billId];\n      render();\n    } catch (e) {\n      showToast(\"Couldn't add item — please try again.\");\n    }\n  }\n\n  async function removeBillItem(billId, itemId) {\n    var updated = getRecurringBills().map(function (b) {\n      if (b.id !== billId) return b;\n      return Object.assign({}, b, { items: (b.items || []).filter(function (it) { return it.id !== itemId; }) });\n    });\n    try {\n      await patchHousehold({ recurringBills: updated });\n      render();\n    } catch (e) {\n      showToast(\"Couldn't remove item — please try again.\");\n    }\n  }\n\n  // Runs after every household load. Posts an expense entry for any\n  // recurring bill that hasn't yet posted for the current cutoff period\n  // (catching up on periods missed while the app was closed), and posts\n  // one-time bills exactly once before removing them. Safe to call\n  // repeatedly: postedPeriods makes it idempotent.\n  async function autoPostBills() {\n    if (autoPosting || !household) return;\n    var bills = getRecurringBills();\n    if (!bills.length) return;\n    var c = getCutoff();\n    var nowEnd = periodEndForDate(new Date(), c.day1, c.day2);\n\n    var newEntries = [];\n    var updatedBills = [];\n    var changed = false;\n\n    bills.forEach(function (bill) {\n      var total = billTotal(bill);\n      if (total <= 0) { updatedBills.push(bill); return; }\n\n      if (!bill.recurring) {\n        // One-time bill: post once (if not already posted) then drop it.\n        if ((bill.postedPeriods || []).length === 0) {\n          newEntries.push(makeAutoEntry(bill, total, periodKeyFromEnd(nowEnd, c.day1)));\n          changed = true;\n          return; // not kept in updatedBills — removes itself\n        }\n        return;\n      }\n\n      // Recurring bill: walk forward from the last posted period (or the\n      // current one, if never posted) up to now, posting anything missed.\n      var posted = (bill.postedPeriods || []).slice();\n      var cursor = posted.length ? findEndForKey(posted[posted.length - 1], nowEnd, c) : nowEnd;\n      var toPost = [];\n      var guard = 0;\n      while (cursor <= nowEnd && guard < 36) {\n        var key = periodKeyFromEnd(cursor, c.day1);\n        if (posted.indexOf(key) === -1) toPost.push({ end: cursor, key: key });\n        cursor = nextPeriodEnd(cursor, c.day1, c.day2);\n        guard++;\n      }\n      if (toPost.length) {\n        toPost.forEach(function (p) {\n          newEntries.push(makeAutoEntry(bill, total, p.key));\n          posted.push(p.key);\n        });\n        changed = true;\n      }\n      updatedBills.push(Object.assign({}, bill, { postedPeriods: posted }));\n    });\n\n    if (!changed) return;\n    autoPosting = true;\n    try {\n      await patchHousehold({\n        entries: newEntries.concat(household.entries || []),\n        recurringBills: updatedBills,\n      });\n      render();\n    } catch (e) {\n      // Silent failure is fine here — it will simply retry on next load/poll.\n    } finally {\n      autoPosting = false;\n    }\n  }\n  // Best-effort: given the last posted period's key, find its end Date so we\n  // can resume iterating forward. Falls back to \"now\" if it can't be parsed.\n  function findEndForKey(key, fallback, c) {\n    var m = /^(\\d{4})-(\\d{2})-([AB])$/.exec(key || \"\");\n    if (!m) return fallback;\n    var end = dateOnly(parseInt(m[1], 10), parseInt(m[2], 10) - 1, m[3] === \"A\" ? c.day1 : c.day2);\n    return nextPeriodEnd(end, c.day1, c.day2);\n  }\n  function makeAutoEntry(bill, total, periodKey) {\n    return {\n      id: uid(),\n      viewerId: profile.viewerId,\n      displayName: profile.displayName,\n      type: \"expense\",\n      category: \"Credit Card\",\n      amount: total,\n      note: bill.label + \" (auto-posted)\",\n      date: todayISO(),\n      autoBillId: bill.id,\n      periodKey: periodKey,\n    };\n  }\n\n  async function addEntry(amount, note, date) {\n    var amt = parseFloat(amount);\n    if (!amt || amt <= 0) { showToast(\"Please enter a valid amount.\"); return; }\n    var entry = {\n      id: uid(),\n      viewerId: profile.viewerId,\n      displayName: profile.displayName,\n      type: entryType,\n      category: entryCategory,\n      amount: amt,\n      note: (note || \"\").trim(),\n      date: date || todayISO(),\n    };\n    var entries = [entry].concat(household.entries || []);\n    try {\n      await patchHousehold({ entries: entries });\n      render();\n      showToast(entryType === \"income\" ? \"Income added.\" : \"Expense added.\");\n    } catch (e) {\n      showToast(\"Couldn't save — please try again.\");\n    }\n  }\n\n  async function deleteEntry(id, ownerViewerId) {\n    if (ownerViewerId !== profile.viewerId) return;\n    if (!window.confirm(\"Delete this entry?\")) return;\n    var entries = (household.entries || []).filter(function (en) { return en.id !== id; });\n    try {\n      await patchHousehold({ entries: entries });\n      render();\n      showToast(\"Entry deleted.\");\n    } catch (e) {\n      showToast(\"Couldn't delete — please try again.\");\n    }\n  }\n\n  async function setBudget(category, amountStr) {\n    var amt = parseFloat(amountStr);\n    if (!category) { showToast(\"Please select a category.\"); return; }\n    if (!amt || amt <= 0) { showToast(\"Please enter a valid amount.\"); return; }\n    var mk = monthKey(activeYear, activeMonthIdx);\n    var budgets = Object.assign({}, household.budgets || {});\n    budgets[mk] = Object.assign({}, budgets[mk] || {});\n    budgets[mk][category] = amt;\n    try {\n      await patchHousehold({ budgets: budgets });\n      render();\n      showToast(\"Budget set for \" + category + \".\");\n    } catch (e) {\n      showToast(\"Couldn't save the budget — please try again.\");\n    }\n  }\n\n  async function removeBudget(category) {\n    var mk = monthKey(activeYear, activeMonthIdx);\n    var budgets = Object.assign({}, household.budgets || {});\n    if (budgets[mk] && Object.prototype.hasOwnProperty.call(budgets[mk], category)) {\n      var monthBudgets = Object.assign({}, budgets[mk]);\n      delete monthBudgets[category];\n      budgets[mk] = monthBudgets;\n      try {\n        await patchHousehold({ budgets: budgets });\n        render();\n        showToast(\"Budget removed.\");\n      } catch (e) {\n        showToast(\"Couldn't delete — please try again.\");\n      }\n    }\n  }\n\n  function shiftMonth(delta) {\n    var m = activeMonthIdx + delta, y = activeYear;\n    if (m < 0) { m = 11; y -= 1; }\n    if (m > 11) { m = 0; y += 1; }\n    activeMonthIdx = m; activeYear = y;\n    render();\n  }\n\n  function computeMonthData() {\n    var entries = (household && household.entries) || [];\n    var monthEntries = entries.filter(function (en) {\n      var d = new Date(en.date + \"T00:00:00\");\n      return d.getFullYear() === activeYear && d.getMonth() === activeMonthIdx;\n    });\n    var income = 0, expense = 0;\n    monthEntries.forEach(function (en) {\n      if (en.type === \"income\") income += en.amount; else expense += en.amount;\n    });\n    var catMap = {};\n    monthEntries.filter(function (en) { return en.type === \"expense\"; }).forEach(function (en) {\n      catMap[en.category] = (catMap[en.category] || 0) + en.amount;\n    });\n    var categoryBreakdown = Object.keys(catMap).map(function (k) { return { category: k, amount: catMap[k] }; })\n      .sort(function (a, b) { return b.amount - a.amount; });\n\n    var memberMap = {};\n    (household.members || []).forEach(function (m) {\n      memberMap[m.id] = { displayName: m.displayName, income: 0, expense: 0 };\n    });\n    monthEntries.forEach(function (en) {\n      if (!memberMap[en.viewerId]) memberMap[en.viewerId] = { displayName: en.displayName, income: 0, expense: 0 };\n      if (en.type === \"income\") memberMap[en.viewerId].income += en.amount;\n      else memberMap[en.viewerId].expense += en.amount;\n    });\n    var memberBreakdown = Object.keys(memberMap).map(function (k) { return memberMap[k]; });\n\n    return { monthEntries: monthEntries, income: income, expense: expense, balance: income - expense, categoryBreakdown: categoryBreakdown, memberBreakdown: memberBreakdown };\n  }\n\n  // Same shape as computeMonthData, but filters entries into an arbitrary\n  // inclusive date range instead of a calendar month. Used by cutoff view.\n  function computeRangeData(startDate, endDate) {\n    var entries = (household && household.entries) || [];\n    var rangeEntries = entries.filter(function (en) {\n      var d = new Date(en.date + \"T00:00:00\");\n      return d >= startDate && d <= endDate;\n    });\n    var income = 0, expense = 0;\n    rangeEntries.forEach(function (en) {\n      if (en.type === \"income\") income += en.amount; else expense += en.amount;\n    });\n    var catMap = {};\n    rangeEntries.filter(function (en) { return en.type === \"expense\"; }).forEach(function (en) {\n      catMap[en.category] = (catMap[en.category] || 0) + en.amount;\n    });\n    var categoryBreakdown = Object.keys(catMap).map(function (k) { return { category: k, amount: catMap[k] }; })\n      .sort(function (a, b) { return b.amount - a.amount; });\n\n    var memberMap = {};\n    (household.members || []).forEach(function (m) {\n      memberMap[m.id] = { displayName: m.displayName, income: 0, expense: 0 };\n    });\n    rangeEntries.forEach(function (en) {\n      if (!memberMap[en.viewerId]) memberMap[en.viewerId] = { displayName: en.displayName, income: 0, expense: 0 };\n      if (en.type === \"income\") memberMap[en.viewerId].income += en.amount;\n      else memberMap[en.viewerId].expense += en.amount;\n    });\n    var memberBreakdown = Object.keys(memberMap).map(function (k) { return memberMap[k]; });\n\n    return { monthEntries: rangeEntries, income: income, expense: expense, balance: income - expense, categoryBreakdown: categoryBreakdown, memberBreakdown: memberBreakdown };\n  }\n\n  function categoryChartSVG(data) {\n    if (!data.length) return \"\";\n    var w = 640, rowH = 30, top = 6, left = 130, right = 70;\n    var maxVal = Math.max.apply(null, data.map(function (d) { return d.amount; })) || 1;\n    var h = top * 2 + data.length * rowH;\n    var barMaxW = w - left - right;\n    var rows = data.map(function (d, i) {\n      var y = top + i * rowH;\n      var barW = Math.max(2, (d.amount / maxVal) * barMaxW);\n      return (\n        '<text x=\"' + (left - 10) + '\" y=\"' + (y + rowH / 2 + 4) + '\" text-anchor=\"end\" font-size=\"12\" fill=\"var(--ink)\">' + esc(d.category) + '</text>' +\n        '<rect x=\"' + left + '\" y=\"' + (y + 6) + '\" width=\"' + barW + '\" height=\"' + (rowH - 12) + '\" rx=\"2\" fill=\"var(--expense)\" />' +\n        '<text x=\"' + (left + barW + 8) + '\" y=\"' + (y + rowH / 2 + 4) + '\" font-size=\"11.5\" fill=\"var(--ink-soft)\" font-family=\\'\"Space Grotesk\", monospace\\'>' + peso(d.amount) + '</text>'\n      );\n    }).join(\"\");\n    return '<svg viewBox=\"0 0 ' + w + ' ' + h + '\" width=\"100%\" style=\"max-width:640px;display:block\" xmlns=\"http://www.w3.org/2000/svg\">' + rows + '</svg>';\n  }\n\n  function spentFor(categoryBreakdown, category) {\n    var found = categoryBreakdown.filter(function (c) { return c.category === category; })[0];\n    return found ? found.amount : 0;\n  }\n\n  function budgetSectionHTML(d) {\n    var monthBudgets = currentMonthBudgets();\n    var categories = Object.keys(monthBudgets);\n\n    var rows = categories.map(function (cat) {\n      var budget = monthBudgets[cat];\n      var spent = spentFor(d.categoryBreakdown, cat);\n      var remaining = budget - spent;\n      var pct = budget > 0 ? Math.min(100, (spent / budget) * 100) : 0;\n      var over = remaining < 0;\n      var barColor = over ? \"var(--expense)\" : \"var(--gold)\";\n      var noteColor = over ? \"var(--expense)\" : \"var(--ink-soft)\";\n      return (\n        '<div class=\"budget-row\">' +\n          '<div class=\"budget-row-head\">' +\n            '<div style=\"font-size:13px;font-weight:500\">' + esc(cat) + '</div>' +\n            '<div style=\"display:flex;align-items:center;gap:8px\">' +\n              '<div class=\"num\" style=\"font-size:12.5px;color:' + noteColor + '\">' + peso(spent) + ' / ' + peso(budget) + '</div>' +\n              '<button class=\"btn-icon\" data-rmbudget=\"' + esc(cat) + '\" title=\"Remove budget\" aria-label=\"Remove budget\">\\u2715</button>' +\n            '</div>' +\n          '</div>' +\n          '<div class=\"budget-bar-track\"><div class=\"budget-bar-fill\" style=\"width:' + pct + '%;background:' + barColor + '\"></div></div>' +\n          '<div class=\"budget-note\" style=\"color:' + noteColor + '\">' + (over ? \"Over by \" + peso(Math.abs(remaining)) : \"Remaining: \" + peso(remaining)) + '</div>' +\n        '</div>'\n      );\n    }).join(\"\");\n\n    return (\n      '<div style=\"margin-bottom:28px\">' +\n        '<div class=\"section-label\">Budgets \\u2014 ' + MONTHS_FIL[activeMonthIdx] + '</div>' +\n        (rows || '<div class=\"entry-empty\" style=\"margin-bottom:14px\">No budget set for this month yet.</div>') +\n        '<form id=\"budget-form\" class=\"two-col\" style=\"align-items:end;margin-top:6px\">' +\n          '<label class=\"field\">Category<select class=\"input\" id=\"f-budget-category\">' +\n            EXPENSE_CATEGORIES.map(function (c) { return '<option value=\"' + esc(c) + '\">' + esc(c) + '</option>'; }).join(\"\") +\n          '</select></label>' +\n          '<label class=\"field\">Budget (\\u20B1)<input class=\"input\" type=\"number\" min=\"0\" step=\"0.01\" id=\"f-budget-amount\" placeholder=\"0.00\" /></label>' +\n          '<button type=\"submit\" class=\"btn-primary\" style=\"grid-column:1 / -1\">Set budget</button>' +\n        '</form>' +\n      '</div>'\n    );\n  }\n\n  function entryRowHTML(en) {\n    var canDelete = en.viewerId === profile.viewerId;\n    return (\n      '<div class=\"entry-row\">' +\n        '<div>' +\n          '<div style=\"font-weight:500\">' + esc(en.category) + '</div>' +\n          '<div style=\"color:var(--ink-soft)\">' + esc(en.displayName) + ' \\u00B7 ' + esc(en.date) + (en.note ? ' \\u00B7 ' + esc(en.note) : '') + '</div>' +\n        '</div>' +\n        '<div style=\"display:flex;align-items:center;gap:8px;flex-shrink:0\">' +\n          '<div class=\"num\">' + peso(en.amount) + '</div>' +\n          (canDelete ? '<button class=\"btn-icon\" data-del=\"' + esc(en.id) + '\" data-owner=\"' + esc(en.viewerId) + '\" title=\"Delete\" aria-label=\"Delete entry\">\\u2715</button>' : '') +\n        '</div>' +\n      '</div>'\n    );\n  }\n\n  function ledgerColumnHTML(title, colorVar, total, entries, borderClass) {\n    var body = entries.length\n      ? '<div class=\"entry-list\">' + entries.map(entryRowHTML).join(\"\") + '</div>'\n      : '<div class=\"entry-empty\">No entries yet.</div>';\n    return (\n      '<div class=\"ledger-col ' + borderClass + '\">' +\n        '<div class=\"ledger-head\">' +\n          '<div style=\"font-size:13px;font-weight:600;color:' + colorVar + '\">' + title + '</div>' +\n          '<div class=\"num\" style=\"font-weight:700;color:' + colorVar + '\">' + peso(total) + '</div>' +\n        '</div>' +\n        body +\n      '</div>'\n    );\n  }\n\n  function renderAuth() {\n    var createActive = authMode === \"create\";\n    root.innerHTML =\n      '<div class=\"auth-shell\"><div class=\"auth-card\">' +\n        '<div style=\"margin-bottom:28px\">' +\n          '<div class=\"serif\" style=\"font-weight:700;font-size:34px;letter-spacing:-0.01em\">Alkansya</div>' +\n          '<div style=\"color:var(--ink-soft);font-size:14px;margin-top:4px;border-top:1px solid var(--rule);padding-top:10px\">The family notebook for income and expenses.</div>' +\n        '</div>' +\n        '<div class=\"tabs\">' +\n          '<button class=\"tab-btn ' + (createActive ? \"active\" : \"\") + '\" id=\"tab-create\">Create a household</button>' +\n          '<button class=\"tab-btn ' + (!createActive ? \"active\" : \"\") + '\" id=\"tab-join\">Join a household</button>' +\n        '</div>' +\n        (authError ? '<div class=\"err\">' + esc(authError) + '</div>' : '') +\n        '<form id=\"auth-form\">' +\n          '<label class=\"field\">Your name<input class=\"input\" id=\"f-display\" placeholder=\"e.g. Mom Rosa\" /></label>' +\n          (createActive\n            ? '<label class=\"field\">Household name<input class=\"input\" id=\"f-household\" placeholder=\"e.g. The Santos Family\" /></label>'\n            : '<label class=\"field\">Household code<input class=\"input\" id=\"f-code\" placeholder=\"e.g. SANT-482\" /></label>') +\n          '<button type=\"submit\" class=\"btn-primary\" ' + (busy ? \"disabled\" : \"\") + '>' + (busy ? \"Creating...\" : (createActive ? \"Create household\" : \"Join\")) + '</button>' +\n        '</form>' +\n        '<div class=\"disclaimer\">This link is for your family only. Anyone who has the link can view and add entries to this household.</div>' +\n      '</div></div>';\n\n    document.getElementById(\"tab-create\").onclick = function () { authMode = \"create\"; authError = \"\"; render(); };\n    document.getElementById(\"tab-join\").onclick = function () { authMode = \"join\"; authError = \"\"; render(); };\n    document.getElementById(\"auth-form\").onsubmit = function (e) {\n      e.preventDefault();\n      var displayName = document.getElementById(\"f-display\").value;\n      if (createActive) {\n        handleCreate(document.getElementById(\"f-household\").value, displayName);\n      } else {\n        handleJoin(document.getElementById(\"f-code\").value, displayName);\n      }\n    };\n  }\n\n  function renderLoading(msg) {\n    root.innerHTML = '<div class=\"auth-shell\"><div style=\"color:var(--ink-soft);font-size:14px\">' + esc(msg || \"Loading...\") + '</div></div>';\n  }\n\n  function renderNoDb() {\n    root.innerHTML = '<div class=\"auth-shell\"><div class=\"auth-card\" style=\"text-align:center\">' +\n      '<div class=\"serif\" style=\"font-weight:700;font-size:26px;margin-bottom:10px\">Alkansya</div>' +\n      '<div style=\"color:var(--ink-soft);font-size:14px;line-height:1.6\">Every user of this app needs to be signed in to see the household\\'s shared data. Please check your sign-in and try reloading the page.</div>' +\n      '</div></div>';\n  }\n\n  function renderMissingHousehold() {\n    root.innerHTML = '<div class=\"auth-shell\"><div class=\"auth-card\" style=\"text-align:center\">' +\n      '<div class=\"serif\" style=\"font-weight:700;font-size:26px;margin-bottom:10px\">Household not found</div>' +\n      '<div style=\"color:var(--ink-soft);font-size:14px;margin-bottom:18px\">This household may have been deleted.</div>' +\n      '<button class=\"btn-primary\" id=\"reset-btn\">Back to setup</button>' +\n      '</div></div>';\n    document.getElementById(\"reset-btn\").onclick = handleLogout;\n  }\n\n  function billsSectionHTML() {\n    var bills = getRecurringBills();\n    var c = getCutoff();\n    var quickAdds = [\"Credit Card 1\", \"Credit Card 2\", \"Credit Card 3\"]\n      .filter(function (label) { return !bills.some(function (b) { return b.label === label; }); })\n      .map(function (label) {\n        return '<button type=\"button\" class=\"btn-ghost\" data-quickbill=\"' + esc(label) + '\">+ ' + esc(label) + '</button>';\n      }).join(\"\");\n\n    var billRows = bills.map(function (bill) {\n      var total = billTotal(bill);\n      var draft = newBillDrafts[bill.id] || { label: \"\", amount: \"\" };\n      var itemRows = (bill.items || []).map(function (it) {\n        return '<div class=\"entry-row\"><div>' + esc(it.label) + '</div><div style=\"display:flex;align-items:center;gap:8px\"><div class=\"num\">' + peso(it.amount) + '</div><button type=\"button\" class=\"btn-icon\" data-rmitem=\"' + esc(bill.id) + '|' + esc(it.id) + '\" title=\"Remove item\" aria-label=\"Remove item\">\\u2715</button></div></div>';\n      }).join(\"\") || '<div class=\"entry-empty\">No items yet.</div>';\n      return (\n        '<div style=\"border:1px solid var(--rule);border-radius:4px;padding:12px 14px;margin-bottom:12px\">' +\n          '<div class=\"budget-row-head\">' +\n            '<div style=\"display:flex;align-items:center;gap:8px\">' +\n              '<div style=\"font-size:13.5px;font-weight:600\">' + esc(bill.label) + '</div>' +\n              '<div style=\"font-size:11px;color:var(--ink-soft);border:1px solid var(--rule);border-radius:3px;padding:1px 6px\">' + (bill.recurring ? \"Recurring \\u00B7 posts each period\" : \"One-time \\u00B7 posts once\") + '</div>' +\n            '</div>' +\n            '<div style=\"display:flex;align-items:center;gap:10px\">' +\n              '<div class=\"num\" style=\"font-weight:700\">' + peso(total) + '</div>' +\n              '<button type=\"button\" class=\"btn-icon\" data-rmbill=\"' + esc(bill.id) + '\" title=\"Remove bill\" aria-label=\"Remove bill\">\\u2715</button>' +\n            '</div>' +\n          '</div>' +\n          '<div class=\"entry-list\" style=\"max-height:none;margin-bottom:8px\">' + itemRows + '</div>' +\n          '<form class=\"two-col\" data-additem=\"' + esc(bill.id) + '\" style=\"align-items:end\">' +\n            '<label class=\"field\">Item label<input class=\"input\" data-billfield=\"label\" placeholder=\"e.g. Get together\" value=\"' + esc(draft.label) + '\" /></label>' +\n            '<label class=\"field\">Amount (\\u20B1)<input class=\"input\" type=\"number\" min=\"0\" step=\"0.01\" data-billfield=\"amount\" placeholder=\"0.00\" value=\"' + esc(draft.amount) + '\" /></label>' +\n            '<button type=\"submit\" class=\"btn-ghost\" style=\"grid-column:1 / -1\">+ Add item</button>' +\n          '</form>' +\n        '</div>'\n      );\n    }).join(\"\");\n\n    return (\n      '<div style=\"margin-bottom:28px\">' +\n        '<div class=\"section-label\">Recurring &amp; credit card bills</div>' +\n        '<div style=\"font-size:12px;color:var(--ink-soft);margin-bottom:12px\">Recurring bills post themselves as an expense automatically once per cutoff period (' + c.day1 + '/' + c.day2 + '). One-time bills post once, then disappear from this list.</div>' +\n        (billRows || '<div class=\"entry-empty\" style=\"margin-bottom:12px\">No bills yet.</div>') +\n        '<div style=\"display:flex;flex-wrap:wrap;gap:8px;align-items:center\">' +\n          quickAdds +\n          '<form data-onetimebill=\"1\" style=\"display:flex;gap:8px;align-items:center\">' +\n            '<input class=\"input\" style=\"width:auto\" id=\"f-onetime-label\" placeholder=\"One-time bill name\" value=\"' + esc(oneTimeLabelDraft) + '\" />' +\n            '<button type=\"submit\" class=\"btn-ghost\">+ One-time bill</button>' +\n          '</form>' +\n        '</div>' +\n      '</div>'\n    );\n  }\n\n  function cutoffSettingsHTML() {\n    var c = cutoffDraft || getCutoff();\n    return (\n      '<form id=\"cutoff-form\" class=\"two-col\" style=\"align-items:end;margin:8px 0 20px;padding:12px 14px;border:1px solid var(--rule);border-radius:4px\">' +\n        '<label class=\"field\">1st cutoff day<input class=\"input\" type=\"number\" min=\"1\" max=\"31\" id=\"f-cutoff-day1\" value=\"' + esc(c.day1) + '\" /></label>' +\n        '<label class=\"field\">2nd cutoff day<input class=\"input\" type=\"number\" min=\"1\" max=\"31\" id=\"f-cutoff-day2\" value=\"' + esc(c.day2) + '\" /></label>' +\n        '<button type=\"submit\" class=\"btn-primary\" style=\"grid-column:1 / -1\">Save cutoff days</button>' +\n      '</form>'\n    );\n  }\n\n  function renderDashboard() {\n    ensureActivePeriod();\n    var c = getCutoff();\n    var periodStart = periodStartForEnd(activePeriodEnd, c.day1, c.day2);\n    var d = viewMode === \"cutoff\" ? computeRangeData(periodStart, activePeriodEnd) : computeMonthData();\n    var showMembers = (household.members || []).length > 1;\n\n    // Snapshot whatever is currently in the Add-entry form (and which\n    // field, if any, has focus) so a background poll refresh below\n    // doesn't wipe out text the user is mid-typing.\n    var preservedForm = null;\n    var existingForm = document.getElementById(\"entry-form\");\n    if (existingForm) {\n      var pAmt = document.getElementById(\"f-amount\");\n      var pNote = document.getElementById(\"f-note\");\n      var pDate = document.getElementById(\"f-date\");\n      var active = document.activeElement;\n      preservedForm = {\n        amount: pAmt ? pAmt.value : \"\",\n        note: pNote ? pNote.value : \"\",\n        date: pDate && pDate.value ? pDate.value : todayISO(),\n        focusedId: active && active.id,\n        selectionStart: active && typeof active.selectionStart === \"number\" ? active.selectionStart : null,\n        selectionEnd: active && typeof active.selectionEnd === \"number\" ? active.selectionEnd : null\n      };\n    }\n\n    root.innerHTML =\n      '<div class=\"wrap\">' +\n        '<div class=\"top-bar\">' +\n          '<div>' +\n            '<div class=\"serif\" style=\"font-weight:700;font-size:26px;letter-spacing:-0.01em\">Alkansya</div>' +\n            '<div style=\"font-size:13px;color:var(--ink-soft);margin-top:2px\">' + esc(household.name) + ' \\u00B7 Hi, ' + esc(profile.displayName) + '!</div>' +\n          '</div>' +\n          '<div style=\"display:flex;align-items:center;gap:14px\">' +\n            '<div class=\"code-chip num\">' + esc(household.__code) + '</div>' +\n            '<button class=\"btn-ghost\" id=\"logout-btn\">Log out</button>' +\n          '</div>' +\n        '</div>' +\n\n        '<div class=\"tabs\" style=\"margin-bottom:10px\">' +\n          '<button class=\"tab-btn ' + (viewMode === \"monthly\" ? \"active\" : \"\") + '\" id=\"tab-view-monthly\" type=\"button\">Monthly</button>' +\n          '<button class=\"tab-btn ' + (viewMode === \"cutoff\" ? \"active\" : \"\") + '\" id=\"tab-view-cutoff\" type=\"button\">Cutoff</button>' +\n          '<button class=\"btn-ghost\" id=\"toggle-cutoff-settings\" type=\"button\" style=\"margin-left:auto;border:none;font-size:11.5px\">' + (showCutoffSettings ? \"Hide\" : \"Cutoff settings\") + '</button>' +\n        '</div>' +\n        (showCutoffSettings ? cutoffSettingsHTML() : \"\") +\n        (viewMode === \"cutoff\"\n          ? ('<div class=\"month-nav\">' +\n              '<button class=\"btn-icon\" id=\"prev-period\" aria-label=\"Previous period\">\\u2190</button>' +\n              '<div class=\"num\" style=\"font-size:14px;letter-spacing:0.05em;color:var(--ink-soft)\">' + esc(periodLabel(activePeriodEnd, c.day1, c.day2)) + '</div>' +\n              '<button class=\"btn-icon\" id=\"next-period\" aria-label=\"Next period\">\\u2192</button>' +\n            '</div>')\n          : ('<div class=\"month-nav\">' +\n              '<button class=\"btn-icon\" id=\"prev-month\" aria-label=\"Previous month\">\\u2190</button>' +\n              '<div class=\"num\" style=\"font-size:14px;letter-spacing:0.05em;color:var(--ink-soft)\">' + MONTHS_FIL[activeMonthIdx] + ' ' + activeYear + '</div>' +\n              '<button class=\"btn-icon\" id=\"next-month\" aria-label=\"Next month\">\\u2192</button>' +\n            '</div>')) +\n\n        '<div class=\"balance\">' +\n          '<div style=\"font-size:13px;color:var(--ink-soft);margin-bottom:4px\">Remaining balance</div>' +\n          '<div class=\"num amt\" style=\"color:' + (d.balance >= 0 ? \"var(--income)\" : \"var(--expense)\") + '\">' + peso(d.balance) + '</div>' +\n        '</div>' +\n\n        '<div class=\"ledger-grid\">' +\n          ledgerColumnHTML(\"Income\", \"var(--income)\", d.income, d.monthEntries.filter(function (e) { return e.type === \"income\"; }), \"left\") +\n          ledgerColumnHTML(\"Expenses\", \"var(--expense)\", d.expense, d.monthEntries.filter(function (e) { return e.type === \"expense\"; }), \"\") +\n        '</div>' +\n\n        budgetSectionHTML(d) +\n\n        billsSectionHTML() +\n\n        (d.categoryBreakdown.length\n          ? '<div style=\"margin-bottom:28px\"><div class=\"section-label\">Expense breakdown</div><div class=\"overflow-x\">' + categoryChartSVG(d.categoryBreakdown) + '</div></div>'\n          : \"\") +\n\n        (showMembers\n          ? '<div style=\"margin-bottom:28px\"><div class=\"section-label\">Each member\\'s contribution</div><div class=\"overflow-x\"><table><thead><tr><th>Member</th><th style=\"text-align:right\">Income</th><th style=\"text-align:right\">Expenses</th></tr></thead><tbody>' +\n            d.memberBreakdown.map(function (m) {\n              return '<tr><td>' + esc(m.displayName) + '</td><td class=\"num\" style=\"text-align:right;color:var(--income)\">' + peso(m.income) + '</td><td class=\"num\" style=\"text-align:right;color:var(--expense)\">' + peso(m.expense) + '</td></tr>';\n            }).join(\"\") + '</tbody></table></div></div>'\n          : \"\") +\n\n        '<div>' +\n          '<div class=\"section-label\">Add entry</div>' +\n          '<form id=\"entry-form\">' +\n            '<div class=\"radio-row\">' +\n              '<label><input type=\"radio\" name=\"etype\" value=\"expense\" ' + (entryType === \"expense\" ? \"checked\" : \"\") + '/> Expense</label>' +\n              '<label><input type=\"radio\" name=\"etype\" value=\"income\" ' + (entryType === \"income\" ? \"checked\" : \"\") + '/> Income</label>' +\n            '</div>' +\n            '<div class=\"two-col\">' +\n              '<label class=\"field\">Category<select class=\"input\" id=\"f-category\">' +\n                (entryType === \"income\" ? INCOME_CATEGORIES : EXPENSE_CATEGORIES).map(function (c) {\n                  return '<option value=\"' + esc(c) + '\" ' + (c === entryCategory ? \"selected\" : \"\") + '>' + esc(c) + '</option>';\n                }).join(\"\") +\n              '</select></label>' +\n              '<label class=\"field\">Amount (\\u20B1)<input class=\"input\" type=\"number\" min=\"0\" step=\"0.01\" id=\"f-amount\" placeholder=\"0.00\" /></label>' +\n            '</div>' +\n            (entryType === \"expense\" && currentMonthBudgets()[entryCategory] !== undefined\n              ? (function () {\n                  var rem = currentMonthBudgets()[entryCategory] - spentFor(d.categoryBreakdown, entryCategory);\n                  return '<div class=\"budget-hint\" style=\"color:' + (rem < 0 ? \"var(--expense)\" : \"var(--ink-soft)\") + '\">Remaining budget for ' + esc(entryCategory) + ': ' + peso(rem) + '</div>';\n                })()\n              : \"\") +\n            '<div class=\"two-col\">' +\n              '<label class=\"field\">Note (optional)<input class=\"input\" id=\"f-note\" placeholder=\"e.g. Groceries at the store\" /></label>' +\n              '<label class=\"field\">Date<input class=\"input\" type=\"date\" id=\"f-date\" value=\"' + (preservedForm ? preservedForm.date : todayISO()) + '\" /></label>' +\n            '</div>' +\n            '<button type=\"submit\" class=\"btn-primary\">+ Add</button>' +\n          '</form>' +\n        '</div>' +\n      '</div>';\n\n    // Put back whatever the user had typed and which field they were in,\n    // now that the fresh HTML (possibly from a background poll) is in place.\n    if (preservedForm) {\n      var rAmt = document.getElementById(\"f-amount\");\n      var rNote = document.getElementById(\"f-note\");\n      if (rAmt) rAmt.value = preservedForm.amount;\n      if (rNote) rNote.value = preservedForm.note;\n      if (preservedForm.focusedId) {\n        var toFocus = document.getElementById(preservedForm.focusedId);\n        if (toFocus) {\n          toFocus.focus();\n          if (preservedForm.selectionStart !== null && toFocus.setSelectionRange) {\n            try { toFocus.setSelectionRange(preservedForm.selectionStart, preservedForm.selectionEnd); } catch (e) {}\n          }\n        }\n      }\n    }\n\n    document.getElementById(\"logout-btn\").onclick = handleLogout;\n\n    document.getElementById(\"tab-view-monthly\").onclick = function () { viewMode = \"monthly\"; render(); };\n    document.getElementById(\"tab-view-cutoff\").onclick = function () { viewMode = \"cutoff\"; ensureActivePeriod(); render(); };\n    document.getElementById(\"toggle-cutoff-settings\").onclick = function () { showCutoffSettings = !showCutoffSettings; cutoffDraft = null; render(); };\n\n    var cutoffForm = document.getElementById(\"cutoff-form\");\n    if (cutoffForm) {\n      cutoffForm.onsubmit = function (e) {\n        e.preventDefault();\n        saveCutoff(document.getElementById(\"f-cutoff-day1\").value, document.getElementById(\"f-cutoff-day2\").value);\n      };\n    }\n\n    var prevMonthBtn = document.getElementById(\"prev-month\");\n    if (prevMonthBtn) prevMonthBtn.onclick = function () { shiftMonth(-1); };\n    var nextMonthBtn = document.getElementById(\"next-month\");\n    if (nextMonthBtn) nextMonthBtn.onclick = function () { shiftMonth(1); };\n    var prevPeriodBtn = document.getElementById(\"prev-period\");\n    if (prevPeriodBtn) prevPeriodBtn.onclick = function () { shiftPeriod(-1); };\n    var nextPeriodBtn = document.getElementById(\"next-period\");\n    if (nextPeriodBtn) nextPeriodBtn.onclick = function () { shiftPeriod(1); };\n\n    Array.prototype.forEach.call(root.querySelectorAll(\"[data-quickbill]\"), function (btn) {\n      btn.onclick = function () { addBill(btn.getAttribute(\"data-quickbill\"), true); };\n    });\n    var oneTimeForm = root.querySelector('form[data-onetimebill]');\n    if (oneTimeForm) {\n      oneTimeForm.onsubmit = function (e) {\n        e.preventDefault();\n        var label = document.getElementById(\"f-onetime-label\").value.trim();\n        if (!label) { showToast(\"Please name the one-time bill.\"); return; }\n        oneTimeLabelDraft = \"\";\n        addBill(label, false);\n      };\n    }\n    Array.prototype.forEach.call(root.querySelectorAll(\"[data-additem]\"), function (form) {\n      var billId = form.getAttribute(\"data-additem\");\n      form.onsubmit = function (e) {\n        e.preventDefault();\n        var labelInput = form.querySelector('[data-billfield=\"label\"]');\n        var amountInput = form.querySelector('[data-billfield=\"amount\"]');\n        addBillItem(billId, labelInput.value, amountInput.value);\n      };\n    });\n    Array.prototype.forEach.call(root.querySelectorAll(\"[data-rmitem]\"), function (btn) {\n      btn.onclick = function () {\n        var parts = btn.getAttribute(\"data-rmitem\").split(\"|\");\n        removeBillItem(parts[0], parts[1]);\n      };\n    });\n    Array.prototype.forEach.call(root.querySelectorAll(\"[data-rmbill]\"), function (btn) {\n      btn.onclick = function () { removeBill(btn.getAttribute(\"data-rmbill\")); };\n    });\n\n    Array.prototype.forEach.call(document.querySelectorAll('input[name=\"etype\"]'), function (r) {\n      r.onchange = function () {\n        entryType = r.value;\n        entryCategory = (entryType === \"income\" ? INCOME_CATEGORIES : EXPENSE_CATEGORIES)[0];\n        render();\n      };\n    });\n    document.getElementById(\"f-category\").onchange = function (e) { entryCategory = e.target.value; };\n\n    document.getElementById(\"entry-form\").onsubmit = function (e) {\n      e.preventDefault();\n      var amount = document.getElementById(\"f-amount\").value;\n      var note = document.getElementById(\"f-note\").value;\n      var date = document.getElementById(\"f-date\").value;\n      addEntry(amount, note, date).then(function () {\n        document.getElementById(\"f-amount\").value = \"\";\n        document.getElementById(\"f-note\").value = \"\";\n      });\n    };\n\n    Array.prototype.forEach.call(root.querySelectorAll(\"[data-del]\"), function (btn) {\n      btn.onclick = function () { deleteEntry(btn.getAttribute(\"data-del\"), btn.getAttribute(\"data-owner\")); };\n    });\n\n    var budgetForm = document.getElementById(\"budget-form\");\n    if (budgetForm) {\n      budgetForm.onsubmit = function (e) {\n        e.preventDefault();\n        var cat = document.getElementById(\"f-budget-category\").value;\n        var amt = document.getElementById(\"f-budget-amount\").value;\n        setBudget(cat, amt);\n      };\n    }\n    Array.prototype.forEach.call(root.querySelectorAll(\"[data-rmbudget]\"), function (btn) {\n      btn.onclick = function () { removeBudget(btn.getAttribute(\"data-rmbudget\")); };\n    });\n  }\n\n  function render() {\n    if (view === \"loading\") { renderLoading(); }\n    else if (view === \"setup\") { renderAuth(); }\n    else if (view === \"missing-household\") { renderMissingHousehold(); }\n    else if (view === \"dashboard\" && household) { renderDashboard(); }\n    else { renderLoading(); }\n\n    if (toastMsg) {\n      var t = document.createElement(\"div\");\n      t.className = \"toast\";\n      t.textContent = toastMsg;\n      document.body.appendChild(t);\n    } else {\n      var existing = document.querySelectorAll(\".toast\");\n      existing.forEach(function (el) { el.remove(); });\n    }\n  }\n\n  render();\n  initDb();\n})();\n</script>\n</body>\n</html>\n" },
+];
 
-const PORT = process.env.PORT || 3000;
-const MONGODB_URI = process.env.MONGODB_URI || "";
-const DATA_DIR = path.join(__dirname, "data");
-const DATA_FILE = path.join(DATA_DIR, "households.json");
-
-// ---------------------------------------------------------------------------
-// Storage layer. Two implementations behind the same small interface,
-// selected once at boot depending on whether MONGODB_URI is set. Everything
-// below this block (the routes) is unaware of which backend is active.
-//
-// Render's free web services wipe the local filesystem on every restart,
-// redeploy, or spin-down - that's why households were disappearing. Mongo
-// Atlas lives outside that filesystem, so data survives restarts.
-// ---------------------------------------------------------------------------
-
-let store; // resolved to one of the two implementations below
-
-function makeFileStore() {
-  if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
-  if (!fs.existsSync(DATA_FILE)) fs.writeFileSync(DATA_FILE, JSON.stringify({}), "utf8");
-
-  function readAll() {
-    try {
-      return JSON.parse(fs.readFileSync(DATA_FILE, "utf8"));
-    } catch (e) {
-      return {};
-    }
-  }
-  function writeAll(all) {
-    fs.writeFileSync(DATA_FILE, JSON.stringify(all, null, 2), "utf8");
-  }
-
-  return {
-    kind: "file",
-    async init() {},
-    async getHousehold(code) {
-      const all = readAll();
-      return all[code] || null;
-    },
-    async codeExists(code) {
-      const all = readAll();
-      return Boolean(all[code]);
-    },
-    async createHousehold(household) {
-      const all = readAll();
-      all[household.code] = household;
-      writeAll(all);
-    },
-    async saveHousehold(household) {
-      const all = readAll();
-      all[household.code] = household;
-      writeAll(all);
-    },
-  };
+function findIndexHtmlPath() {
+  if (fs.existsSync("public/index.html")) return "public/index.html";
+  return "index.html";
 }
 
-function makeMongoStore(uri) {
-  const client = new MongoClient(uri, { serverSelectionTimeoutMS: 8000 });
-  let households; // collection handle, set in init()
-
-  return {
-    kind: "mongo",
-    async init() {
-      await client.connect();
-      // Database name comes from MONGODB_DB if set, else this default.
-      // (If your connection string already ends in /somedb, that name is
-      // used automatically by the driver and MONGODB_DB is ignored.)
-      const db = client.db(process.env.MONGODB_DB || "alkansya");
-      households = db.collection("households");
-      await households.createIndex({ code: 1 }, { unique: true });
-    },
-    async getHousehold(code) {
-      return households.findOne({ code }, { projection: { _id: 0 } });
-    },
-    async codeExists(code) {
-      const doc = await households.findOne({ code }, { projection: { _id: 1 } });
-      return Boolean(doc);
-    },
-    async createHousehold(household) {
-      await households.insertOne(household);
-    },
-    async saveHousehold(household) {
-      await households.replaceOne({ code: household.code }, household, { upsert: true });
-    },
-  };
-}
-
-function uid() {
-  return crypto.randomBytes(6).toString("hex");
-}
-
-async function genCode(name) {
-  const base = (name || "PAM")
-    .toUpperCase()
-    .replace(/[^A-Z0-9]/g, "")
-    .slice(0, 4)
-    .padEnd(4, "X");
-  let code;
-  let tries = 0;
-  do {
-    const rand = Math.floor(100 + Math.random() * 900);
-    code = base + "-" + rand;
-    tries++;
-  } while ((await store.codeExists(code)) && tries < 20);
-  return code;
-}
-
-const app = express();
-app.use(express.json());
-app.use(express.static(path.join(__dirname, "public")));
-
-// Create a new household. Body: { householdName, displayName }
-app.post("/api/households", async (req, res) => {
-  try {
-    const { householdName, displayName } = req.body || {};
-    if (!householdName || !householdName.trim()) {
-      return res.status(400).json({ error: "Household name is required." });
-    }
-    if (!displayName || !displayName.trim()) {
-      return res.status(400).json({ error: "Your name is required." });
-    }
-    const code = await genCode(householdName);
-    const viewerId = uid();
-    const household = {
-      code,
-      name: householdName.trim(),
-      members: [{ id: viewerId, displayName: displayName.trim() }],
-      entries: [],
-      budgets: {},
-    };
-    await store.createHousehold(household);
-    res.json({ code, viewerId, household });
-  } catch (e) {
-    console.error("POST /api/households failed:", e);
-    res.status(500).json({ error: "server_error" });
-  }
-});
-
-// Join an existing household. Body: { displayName }
-app.post("/api/households/:code/join", async (req, res) => {
-  try {
-    const code = req.params.code.toUpperCase();
-    const { displayName } = req.body || {};
-    if (!displayName || !displayName.trim()) {
-      return res.status(400).json({ error: "Your name is required." });
-    }
-    const household = await store.getHousehold(code);
-    if (!household) {
-      return res.status(404).json({ error: "not_found" });
-    }
-    const viewerId = uid();
-    household.members.push({ id: viewerId, displayName: displayName.trim() });
-    await store.saveHousehold(household);
-    res.json({ code, viewerId, household });
-  } catch (e) {
-    console.error("POST /api/households/:code/join failed:", e);
-    res.status(500).json({ error: "server_error" });
-  }
-});
-
-// Fetch a household (used on load and by polling for live-ish updates)
-app.get("/api/households/:code", async (req, res) => {
-  try {
-    const code = req.params.code.toUpperCase();
-    const household = await store.getHousehold(code);
-    if (!household) return res.status(404).json({ error: "not_found" });
-    res.json({ household });
-  } catch (e) {
-    console.error("GET /api/households/:code failed:", e);
-    res.status(500).json({ error: "server_error" });
-  }
-});
-
-// Partial update: body may include entries, budgets, and/or members
-app.patch("/api/households/:code", async (req, res) => {
-  try {
-    const code = req.params.code.toUpperCase();
-    const household = await store.getHousehold(code);
-    if (!household) return res.status(404).json({ error: "not_found" });
-
-    const { entries, budgets, members } = req.body || {};
-    if (entries !== undefined) household.entries = entries;
-    if (budgets !== undefined) household.budgets = budgets;
-    if (members !== undefined) household.members = members;
-
-    await store.saveHousehold(household);
-    res.json({ household });
-  } catch (e) {
-    console.error("PATCH /api/households/:code failed:", e);
-    res.status(500).json({ error: "server_error" });
-  }
-});
-
-async function start() {
-  store = MONGODB_URI ? makeMongoStore(MONGODB_URI) : makeFileStore();
-  try {
-    await store.init();
-  } catch (e) {
-    console.error("Storage init failed (" + store.kind + "):", e.message);
-    if (store.kind === "mongo") {
-      console.error("Falling back to the local JSON file for this run. Fix MONGODB_URI to persist data.");
-      store = makeFileStore();
-      await store.init();
-    } else {
-      throw e;
-    }
-  }
-  app.listen(PORT, () => {
-    console.log("Alkansya running on port " + PORT + " (storage: " + store.kind + ")");
-  });
-}
-
-start();
-`;
-
-const CANDIDATES = ["server.js", "src/server.js", "backend/server.js"];
-
-function fail(msg) {
-  console.error("\n  FAILED\n  " + msg + "\n");
-  process.exit(1);
-}
-
-function locate() {
-  const fromArg = process.argv[2];
-  if (fromArg) {
-    const p = path.resolve(fromArg);
-    if (!fs.existsSync(p)) fail("No file at " + p);
-    return p;
-  }
-  for (const c of CANDIDATES) {
-    const p = path.resolve(process.cwd(), c);
-    if (fs.existsSync(p)) return p;
-  }
-  fail(
-    "Could not find server.js. Looked in:\\n  " +
-      CANDIDATES.join("\\n  ") +
-      "\\nRun from your project root, or pass the path:\\n" +
-      "  node patch-alkansya-mongo.js backend/server.js"
-  );
-}
-
-function ensureDependency(projectRoot) {
-  const pkgPath = path.join(projectRoot, "package.json");
-  if (!fs.existsSync(pkgPath)) {
-    console.log("\n  No package.json found at " + pkgPath + " - skipping dependency install.");
-    console.log("  Run 'npm install mongodb' yourself before starting the server.");
+function patchFile(target) {
+  const file = target.path;
+  console.log("\n" + file);
+  if (!fs.existsSync(file)) {
+    console.log("  not found here, skipping.");
     return;
   }
-  const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf8"));
-  const has = (pkg.dependencies && pkg.dependencies.mongodb) || (pkg.devDependencies && pkg.devDependencies.mongodb);
-  if (has) {
-    console.log("  mongodb dependency already present (" + has + ").");
+  const current = fs.readFileSync(file, "utf8");
+  if (current === target.content) {
+    console.log("  already up to date, skipping.");
     return;
   }
-  console.log("  Installing mongodb driver...");
-  try {
-    execSync("npm install mongodb --save", { cwd: projectRoot, stdio: "inherit" });
-  } catch (e) {
-    console.log(
-      "\n  WARNING: could not run npm install automatically.\n" +
-        "  Run this yourself in " + projectRoot + ":\n" +
-        "    npm install mongodb\n"
-    );
+  const bak = file + ".bak";
+  if (!fs.existsSync(bak)) {
+    fs.copyFileSync(file, bak);
+    console.log("  backed up -> " + bak);
+  } else {
+    console.log("  " + bak + " already exists, leaving it as-is.");
   }
-}
-
-function checkSyntax(code) {
-  try {
-    new Function(code);
-    return { ok: true };
-  } catch (e) {
-    return { ok: false, message: e.message };
-  }
+  fs.writeFileSync(file, target.content, "utf8");
+  console.log("  patched " + file);
 }
 
 function main() {
-  const file = locate();
-  const projectRoot = path.dirname(file);
-  console.log("\n  Alkansya Mongo Atlas patcher");
-  console.log("  target: " + file);
-
-  const original = fs.readFileSync(file, "utf8");
-
-  if (original.trim() === NEW_SERVER.trim()) {
-    console.log("\n  Nothing to change - already patched.\n");
-    ensureDependency(projectRoot);
-    return;
-  }
-
-  if (original.includes("MongoClient") && original.includes("MONGODB_URI")) {
-    fail(
-      "server.js already references MongoClient/MONGODB_URI but doesn't match\n" +
-        "  this patcher's expected output exactly - it looks hand-edited.\n" +
-        "  Nothing was written, to avoid clobbering your changes."
-    );
-  }
-
-  const verify = checkSyntax(NEW_SERVER);
-  if (!verify.ok) {
-    // Should never happen - this would mean a bug in the patcher itself.
-    fail("Internal error: generated server.js does not parse: " + verify.message);
-  }
-
-  const backup = file + ".bak";
-  fs.writeFileSync(backup, original, "utf8");
-  fs.writeFileSync(file, NEW_SERVER, "utf8");
-
-  console.log("\n  Rewrote server.js to use MongoDB Atlas (with automatic");
-  console.log("  local-file fallback when MONGODB_URI isn't set).");
-  console.log("  Backup: " + backup);
-
-  ensureDependency(projectRoot);
-
-  console.log("\n  Next steps:");
-  console.log("    1. Create a free cluster at https://www.mongodb.com/cloud/atlas");
-  console.log("    2. In Atlas: Database Access -> add a user; Network Access -> allow 0.0.0.0/0");
-  console.log("       (or Render's specific IPs, if you prefer to lock it down)");
-  console.log("    3. Copy your connection string (starts with mongodb+srv://)");
-  console.log("    4. In Render: your service -> Environment -> add MONGODB_URI = that string");
-  console.log("    5. Redeploy. Check the logs for: 'storage: mongo'");
-  console.log("\n  Locally, just don't set MONGODB_URI and it keeps using data/households.json.\n");
+  FILES.forEach(patchFile);
+  console.log("\nDone. Restart your server (npm start / node server.js) and reload the page.");
+  console.log("New and existing households both work: missing settings/recurringBills default");
+  console.log("to day1=5, day2=20 and an empty bill list until you add one.");
 }
 
 main();

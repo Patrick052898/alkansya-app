@@ -299,12 +299,25 @@
     if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
   }
 
+  function isEditingForm() {
+    var el = document.activeElement;
+    return !!(el && el.closest && el.closest("#entry-form, #budget-form"));
+  }
+
   async function loadHouseholdOnce(code, silent) {
     try {
       var body = await apiCall("/households/" + encodeURIComponent(code));
       household = body.household;
       household.__code = code;
       view = "dashboard";
+      // A silent background poll can land mid-interaction (e.g. while a
+      // <select> dropdown is open) and a full re-render would yank the
+      // form out from under the user, making their in-progress pick look
+      // like it "reverted". So while they're actively in the form, just
+      // update the data quietly and skip the render — the next natural
+      // render (on submit, or the next poll after they've moved on) will
+      // pick up the fresh data.
+      if (silent && isEditingForm()) return;
       render();
     } catch (e) {
       if (!silent) {
@@ -900,6 +913,12 @@
           if (ok) render();
         });
       };
+    });
+
+    Array.prototype.forEach.call(root.querySelectorAll("#entry-form, #budget-form"), function (formEl) {
+      formEl.addEventListener("focusout", function () {
+        setTimeout(function () { if (!isEditingForm()) render(); }, 0);
+      });
     });
 
     Array.prototype.forEach.call(root.querySelectorAll("[data-del]"), function (btn) {

@@ -329,6 +329,11 @@
       // update the data quietly and skip the render — the next natural
       // render (on submit, or the next poll after they've moved on) will
       // pick up the fresh data.
+      if (profile && profile.viewerId && !(household.members || []).some(function (m) { return m.id === profile.viewerId; })) {
+        handleLogout();
+        showToast("You were removed from this household.");
+        return;
+      }
       if (silent && isEditingForm()) return;
       render();
     } catch (e) {
@@ -428,6 +433,31 @@
       showToast(entryType === "income" ? "Income added." : "Expense added.");
     } catch (e) {
       showToast("Couldn't save — please try again.");
+    }
+  }
+
+  // __remove_member_v1__
+  async function removeMember(id, name) {
+    if (!id || id === profile.viewerId) {
+      showToast("You can't remove yourself. Use Log out instead.");
+      return;
+    }
+    if (!window.confirm('Remove "' + name + '" from this household?')) return;
+    var fields = {
+      members: (household.members || []).filter(function (m) { return m.id !== id; })
+    };
+    var theirs = (household.entries || []).filter(function (en) { return en.viewerId === id; });
+    if (theirs.length && window.confirm(
+      name + " has " + theirs.length + " entries.\n\nOK = also delete their entries\nCancel = keep their entries (totals stay the same)"
+    )) {
+      fields.entries = (household.entries || []).filter(function (en) { return en.viewerId !== id; });
+    }
+    try {
+      await patchHousehold(fields);
+      render();
+      showToast("Member removed.");
+    } catch (e) {
+      showToast("Couldn't remove — please try again.");
     }
   }
 
@@ -542,10 +572,10 @@
 
     var memberMap = {};
     (household.members || []).forEach(function (m) {
-      memberMap[m.id] = { displayName: m.displayName, income: 0, expense: 0 };
+      memberMap[m.id] = { id: m.id, displayName: m.displayName, income: 0, expense: 0 };
     });
     monthEntries.forEach(function (en) {
-      if (!memberMap[en.viewerId]) memberMap[en.viewerId] = { displayName: en.displayName, income: 0, expense: 0 };
+      if (!memberMap[en.viewerId]) memberMap[en.viewerId] = { id: en.viewerId, displayName: en.displayName, income: 0, expense: 0 };
       if (en.type === "income") memberMap[en.viewerId].income += en.amount;
       else memberMap[en.viewerId].expense += en.amount;
     });
@@ -802,9 +832,9 @@
         categoriesSectionHTML() +
 
         (showMembers
-          ? '<div style="margin-bottom:28px"><div class="section-label">Each member\'s contribution</div><div class="overflow-x"><table><thead><tr><th>Member</th><th style="text-align:right">Income</th><th style="text-align:right">Expenses</th></tr></thead><tbody>' +
+          ? '<div style="margin-bottom:28px"><div class="section-label">Each member\'s contribution</div><div class="overflow-x"><table><thead><tr><th>Member</th><th style="text-align:right">Income</th><th style="text-align:right">Expenses</th><th></th></tr></thead><tbody>' +
             d.memberBreakdown.map(function (m) {
-              return '<tr><td>' + esc(m.displayName) + '</td><td class="num" style="text-align:right;color:var(--income)">' + peso(m.income) + '</td><td class="num" style="text-align:right;color:var(--expense)">' + peso(m.expense) + '</td></tr>';
+              return '<tr><td>' + esc(m.displayName) + '</td><td class="num" style="text-align:right;color:var(--income)">' + peso(m.income) + '</td><td class="num" style="text-align:right;color:var(--expense)">' + peso(m.expense) + '</td><td style="text-align:right">' + (m.id && m.id !== profile.viewerId ? '<button type="button" class="btn-icon" data-rmmember="' + esc(m.id) + '" data-rmname="' + esc(m.displayName) + '" title="Remove member" aria-label="Remove member">\u2715</button>' : '') + '</td></tr>';
             }).join("") + '</tbody></table></div></div>'
           : "") +
 
@@ -936,6 +966,12 @@
 
     Array.prototype.forEach.call(root.querySelectorAll("[data-del]"), function (btn) {
       btn.onclick = function () { deleteEntry(btn.getAttribute("data-del"), btn.getAttribute("data-owner")); };
+    });
+
+    Array.prototype.forEach.call(root.querySelectorAll("[data-rmmember]"), function (btn) {
+      btn.onclick = function () {
+        removeMember(btn.getAttribute("data-rmmember"), btn.getAttribute("data-rmname"));
+      };
     });
 
     var budgetForm = document.getElementById("budget-form");

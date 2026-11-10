@@ -171,6 +171,27 @@
   var MONTHS_FIL = ["January","February","March","April","May","June","July","August","September","October","November","December"];
   var INCOME_CATEGORIES = ["Salary","Business","Remittance","Other Income"];
   var EXPENSE_CATEGORIES = ["Food","Rent/Housing","Electricity","Water","Load/Internet","Transportation","Savings","Debt","Education","Health","Entertainment","Other"];
+  var CUTOFFS = [
+    { value: "1", label: "1st cut-off (1\u201315)" },
+    { value: "2", label: "2nd cut-off (16\u2013end)" }
+  ];
+  var ADD_CATEGORY_VALUE = "__add_new__";
+
+  function cutoffOfDate(dateStr) {
+    var day = parseInt(String(dateStr || "").slice(8, 10), 10);
+    return (day && day > 15) ? "2" : "1";
+  }
+  function cutoffLabel(value) {
+    var found = CUTOFFS.filter(function (c) { return c.value === value; })[0];
+    return found ? found.label : "";
+  }
+  function customCategories(type) {
+    return (household && household.customCategories && household.customCategories[type]) || [];
+  }
+  function categoriesFor(type) {
+    var base = type === "income" ? INCOME_CATEGORIES : EXPENSE_CATEGORIES;
+    return base.concat(customCategories(type));
+  }
 
   var root = document.getElementById("root");
   var profile = loadProfile(); // {householdCode, viewerId, displayName} | null
@@ -187,6 +208,8 @@
   var activeMonthIdx = now.getMonth();
   var entryType = "expense";
   var entryCategory = EXPENSE_CATEGORIES[0];
+  var entryCutoff = cutoffOfDate(new Date().toISOString().slice(0, 10));
+  var activeCutoff = "all"; // 'all' | '1' | '2'
 
   function peso(n) {
     var num = Number(n) || 0;
@@ -276,12 +299,25 @@
     if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
   }
 
+  function isEditingForm() {
+    var el = document.activeElement;
+    return !!(el && el.closest && el.closest("#entry-form, #budget-form"));
+  }
+
   async function loadHouseholdOnce(code, silent) {
     try {
       var body = await apiCall("/households/" + encodeURIComponent(code));
       household = body.household;
       household.__code = code;
       view = "dashboard";
+      // A silent background poll can land mid-interaction (e.g. while a
+      // <select> dropdown is open) and a full re-render would yank the
+      // form out from under the user, making their in-progress pick look
+      // like it "reverted". So while they're actively in the form, just
+      // update the data quietly and skip the render — the next natural
+      // render (on submit, or the next poll after they've moved on) will
+      // pick up the fresh data.
+      if (silent && isEditingForm()) return;
       render();
     } catch (e) {
       if (!silent) {
@@ -361,6 +397,7 @@
   async function addEntry(amount, note, date) {
     var amt = parseFloat(amount);
     if (!amt || amt <= 0) { showToast("Please enter a valid amount."); return; }
+    var entryDate = date || todayISO();
     var entry = {
       id: uid(),
       viewerId: profile.viewerId,
@@ -369,7 +406,8 @@
       category: entryCategory,
       amount: amt,
       note: (note || "").trim(),
-      date: date || todayISO(),
+      date: entryDate,
+      cutoff: entryCutoff || cutoffOfDate(entryDate),
     };
     var entries = [entry].concat(household.entries || []);
     try {
@@ -428,6 +466,41 @@
     }
   }
 
+  async function addCategory(type, nameRaw) {
+    var name = (nameRaw || "").trim();
+    if (!name) { showToast("Please enter a category name."); return false; }
+    var builtIn = (type === "income" ? INCOME_CATEGORIES : EXPENSE_CATEGORIES);
+    var existing = categoriesFor(type);
+    if (existing.some(function (c) { return c.toLowerCase() === name.toLowerCase(); })) {
+      showToast("That category already exists.");
+      return false;
+    }
+    var custom = Object.assign({ income: [], expense: [] }, household.customCategories || {});
+    custom[type] = (custom[type] || []).concat([name]);
+    try {
+      await patchHousehold({ customCategories: custom });
+      showToast("Added category \u201c" + name + "\u201d.");
+      return true;
+    } catch (e) {
+      showToast("Couldn't save the category — please try again.");
+      return false;
+    }
+  }
+
+  async function removeCategory(type, name) {
+    if (!window.confirm('Remove category "' + name + '"? Past entries keep it, but it won\u2019t show up for new ones.')) return;
+    var custom = Object.assign({ income: [], expense: [] }, household.customCategories || {});
+    custom[type] = (custom[type] || []).filter(function (c) { return c !== name; });
+    try {
+      await patchHousehold({ customCategories: custom });
+      if (entryCategory === name) entryCategory = categoriesFor(entryType)[0];
+      render();
+      showToast("Category removed.");
+    } catch (e) {
+      showToast("Couldn't remove — please try again.");
+    }
+  }
+
   function shiftMonth(delta) {
     var m = activeMonthIdx + delta, y = activeYear;
     if (m < 0) { m = 11; y -= 1; }
@@ -440,7 +513,9 @@
     var entries = (household && household.entries) || [];
     var monthEntries = entries.filter(function (en) {
       var d = new Date(en.date + "T00:00:00");
-      return d.getFullYear() === activeYear && d.getMonth() === activeMonthIdx;
+      if (d.getFullYear() !== activeYear || d.getMonth() !== activeMonthIdx) return false;
+      if (activeCutoff !== "all" && (en.cutoff || cutoffOfDate(en.date)) !== activeCutoff) return false;
+      return true;
     });
     var income = 0, expense = 0;
     monthEntries.forEach(function (en) {
@@ -532,13 +607,41 @@
     );
   }
 
+  function categoriesSectionHTML() {
+    function colHTML(type, title) {
+      var custom = customCategories(type);
+      var chips = custom.length
+        ? custom.map(function (c) {
+            return '<span style="display:inline-flex;align-items:center;gap:6px;border:1px solid var(--rule);border-radius:12px;padding:3px 10px 3px 12px;font-size:12.5px;margin:0 6px 6px 0">' +
+              esc(c) + '<button type="button" class="btn-icon" style="padding:0" data-rmcat="' + esc(c) + '" data-rmcat-type="' + type + '" title="Remove" aria-label="Remove category">\u2715</button></span>';
+          }).join("")
+        : '<div class="entry-empty" style="margin-bottom:8px">No custom ' + type + ' categories yet.</div>';
+      return (
+        '<div>' +
+          '<div style="font-size:12.5px;font-weight:600;margin-bottom:8px">' + title + '</div>' +
+          '<div style="margin-bottom:8px">' + chips + '</div>' +
+          '<form data-addcat-form="' + type + '" style="display:flex;gap:6px">' +
+            '<input class="input" data-addcat-input="' + type + '" placeholder="New category name" style="flex:1" />' +
+            '<button type="submit" class="btn-ghost">Add</button>' +
+          '</form>' +
+        '</div>'
+      );
+    }
+    return (
+      '<div style="margin-bottom:28px">' +
+        '<div class="section-label">Categories</div>' +
+        '<div class="two-col">' + colHTML("income", "Income") + colHTML("expense", "Expense") + '</div>' +
+      '</div>'
+    );
+  }
+
   function entryRowHTML(en) {
     var canDelete = en.viewerId === profile.viewerId;
     return (
       '<div class="entry-row">' +
         '<div>' +
           '<div style="font-weight:500">' + esc(en.category) + '</div>' +
-          '<div style="color:var(--ink-soft)">' + esc(en.displayName) + ' \u00B7 ' + esc(en.date) + (en.note ? ' \u00B7 ' + esc(en.note) : '') + '</div>' +
+          '<div style="color:var(--ink-soft)">' + esc(en.displayName) + ' \u00B7 ' + esc(en.date) + ' \u00B7 CO' + esc(en.cutoff || cutoffOfDate(en.date)) + (en.note ? ' \u00B7 ' + esc(en.note) : '') + '</div>' +
         '</div>' +
         '<div style="display:flex;align-items:center;gap:8px;flex-shrink:0">' +
           '<div class="num">' + peso(en.amount) + '</div>' +
@@ -623,6 +726,26 @@
     var d = computeMonthData();
     var showMembers = (household.members || []).length > 1;
 
+    // Snapshot whatever is currently in the Add-entry form (and which
+    // field, if any, has focus) so a background poll refresh below
+    // doesn't wipe out text the user is mid-typing.
+    var preservedForm = null;
+    var existingForm = document.getElementById("entry-form");
+    if (existingForm) {
+      var pAmt = document.getElementById("f-amount");
+      var pNote = document.getElementById("f-note");
+      var pDate = document.getElementById("f-date");
+      var active = document.activeElement;
+      preservedForm = {
+        amount: pAmt ? pAmt.value : "",
+        note: pNote ? pNote.value : "",
+        date: pDate && pDate.value ? pDate.value : todayISO(),
+        focusedId: active && active.id,
+        selectionStart: active && typeof active.selectionStart === "number" ? active.selectionStart : null,
+        selectionEnd: active && typeof active.selectionEnd === "number" ? active.selectionEnd : null
+      };
+    }
+
     root.innerHTML =
       '<div class="wrap">' +
         '<div class="top-bar">' +
@@ -641,6 +764,12 @@
           '<div class="num" style="font-size:14px;letter-spacing:0.05em;color:var(--ink-soft)">' + MONTHS_FIL[activeMonthIdx] + ' ' + activeYear + '</div>' +
           '<button class="btn-icon" id="next-month" aria-label="Next month">\u2192</button>' +
         '</div>' +
+        '<div style="display:flex;justify-content:center;gap:6px;margin-bottom:18px">' +
+          ['all', '1', '2'].map(function (v) {
+            var lbl = v === "all" ? "Whole month" : ("CO" + v);
+            return '<button type="button" class="btn-ghost" data-cutoff="' + v + '" style="' + (activeCutoff === v ? "background:var(--ink);color:var(--paper);border-color:var(--ink)" : "") + '">' + lbl + '</button>';
+          }).join("") +
+        '</div>' +
 
         '<div class="balance">' +
           '<div style="font-size:13px;color:var(--ink-soft);margin-bottom:4px">Remaining balance</div>' +
@@ -658,6 +787,8 @@
           ? '<div style="margin-bottom:28px"><div class="section-label">Expense breakdown</div><div class="overflow-x">' + categoryChartSVG(d.categoryBreakdown) + '</div></div>'
           : "") +
 
+        categoriesSectionHTML() +
+
         (showMembers
           ? '<div style="margin-bottom:28px"><div class="section-label">Each member\'s contribution</div><div class="overflow-x"><table><thead><tr><th>Member</th><th style="text-align:right">Income</th><th style="text-align:right">Expenses</th></tr></thead><tbody>' +
             d.memberBreakdown.map(function (m) {
@@ -674,11 +805,20 @@
             '</div>' +
             '<div class="two-col">' +
               '<label class="field">Category<select class="input" id="f-category">' +
-                (entryType === "income" ? INCOME_CATEGORIES : EXPENSE_CATEGORIES).map(function (c) {
+                categoriesFor(entryType).map(function (c) {
                   return '<option value="' + esc(c) + '" ' + (c === entryCategory ? "selected" : "") + '>' + esc(c) + '</option>';
                 }).join("") +
+                '<option value="' + ADD_CATEGORY_VALUE + '">+ Add new category\u2026</option>' +
               '</select></label>' +
               '<label class="field">Amount (\u20B1)<input class="input" type="number" min="0" step="0.01" id="f-amount" placeholder="0.00" /></label>' +
+            '</div>' +
+            '<div class="two-col">' +
+              '<label class="field">Cut-off<select class="input" id="f-cutoff">' +
+                CUTOFFS.map(function (c) {
+                  return '<option value="' + c.value + '" ' + (c.value === entryCutoff ? "selected" : "") + '>' + c.label + '</option>';
+                }).join("") +
+              '</select></label>' +
+              '<div></div>' +
             '</div>' +
             (entryType === "expense" && currentMonthBudgets()[entryCategory] !== undefined
               ? (function () {
@@ -688,12 +828,30 @@
               : "") +
             '<div class="two-col">' +
               '<label class="field">Note (optional)<input class="input" id="f-note" placeholder="e.g. Groceries at the store" /></label>' +
-              '<label class="field">Date<input class="input" type="date" id="f-date" value="' + todayISO() + '" /></label>' +
+              '<label class="field">Date<input class="input" type="date" id="f-date" value="' + (preservedForm ? preservedForm.date : todayISO()) + '" /></label>' +
             '</div>' +
             '<button type="submit" class="btn-primary">+ Add</button>' +
           '</form>' +
         '</div>' +
       '</div>';
+
+    // Put back whatever the user had typed and which field they were in,
+    // now that the fresh HTML (possibly from a background poll) is in place.
+    if (preservedForm) {
+      var rAmt = document.getElementById("f-amount");
+      var rNote = document.getElementById("f-note");
+      if (rAmt) rAmt.value = preservedForm.amount;
+      if (rNote) rNote.value = preservedForm.note;
+      if (preservedForm.focusedId) {
+        var toFocus = document.getElementById(preservedForm.focusedId);
+        if (toFocus) {
+          toFocus.focus();
+          if (preservedForm.selectionStart !== null && toFocus.setSelectionRange) {
+            try { toFocus.setSelectionRange(preservedForm.selectionStart, preservedForm.selectionEnd); } catch (e) {}
+          }
+        }
+      }
+    }
 
     document.getElementById("logout-btn").onclick = handleLogout;
     document.getElementById("prev-month").onclick = function () { shiftMonth(-1); };
@@ -706,7 +864,25 @@
         render();
       };
     });
-    document.getElementById("f-category").onchange = function (e) { entryCategory = e.target.value; };
+    document.getElementById("f-category").onchange = function (e) {
+      if (e.target.value === ADD_CATEGORY_VALUE) {
+        var name = window.prompt("New " + entryType + " category name:");
+        addCategory(entryType, name).then(function (ok) {
+          if (ok) entryCategory = name.trim();
+          render();
+        });
+        return;
+      }
+      entryCategory = e.target.value;
+    };
+    document.getElementById("f-cutoff").onchange = function (e) { entryCutoff = e.target.value; };
+    var fDate = document.getElementById("f-date");
+    if (fDate) {
+      fDate.onchange = function (e) {
+        entryCutoff = cutoffOfDate(e.target.value);
+        render();
+      };
+    }
 
     document.getElementById("entry-form").onsubmit = function (e) {
       e.preventDefault();
@@ -718,6 +894,32 @@
         document.getElementById("f-note").value = "";
       });
     };
+
+    Array.prototype.forEach.call(root.querySelectorAll("[data-cutoff]"), function (btn) {
+      btn.onclick = function () { activeCutoff = btn.getAttribute("data-cutoff"); render(); };
+    });
+
+    Array.prototype.forEach.call(root.querySelectorAll("[data-rmcat]"), function (btn) {
+      btn.onclick = function () {
+        removeCategory(btn.getAttribute("data-rmcat-type"), btn.getAttribute("data-rmcat"));
+      };
+    });
+    Array.prototype.forEach.call(root.querySelectorAll("[data-addcat-form]"), function (form) {
+      form.onsubmit = function (e) {
+        e.preventDefault();
+        var type = form.getAttribute("data-addcat-form");
+        var input = form.querySelector("[data-addcat-input]");
+        addCategory(type, input.value).then(function (ok) {
+          if (ok) render();
+        });
+      };
+    });
+
+    Array.prototype.forEach.call(root.querySelectorAll("#entry-form, #budget-form"), function (formEl) {
+      formEl.addEventListener("focusout", function () {
+        setTimeout(function () { if (!isEditingForm()) render(); }, 0);
+      });
+    });
 
     Array.prototype.forEach.call(root.querySelectorAll("[data-del]"), function (btn) {
       btn.onclick = function () { deleteEntry(btn.getAttribute("data-del"), btn.getAttribute("data-owner")); };

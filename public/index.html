@@ -258,6 +258,14 @@
   }
 
   var pollTimer = null;
+  // __typing_fix_v1__
+  var lastHouseholdSig = null; // JSON of the last household data we rendered
+  var draft = { amount: "", note: "" }; // what the user has typed in Add entry
+  document.addEventListener("input", function (e) {
+    var id = e.target && e.target.id;
+    if (id === "f-amount") draft.amount = e.target.value;
+    else if (id === "f-note") draft.note = e.target.value;
+  });
   var API = "/api";
 
   async function apiCall(path, opts) {
@@ -307,9 +315,13 @@
   async function loadHouseholdOnce(code, silent) {
     try {
       var body = await apiCall("/households/" + encodeURIComponent(code));
+      var sig = JSON.stringify(body.household);
+      var unchanged = !!(silent && view === "dashboard" && household && sig === lastHouseholdSig);
+      lastHouseholdSig = sig;
       household = body.household;
       household.__code = code;
       view = "dashboard";
+      if (unchanged) return; // nothing new -> leave the form alone
       // A silent background poll can land mid-interaction (e.g. while a
       // <select> dropdown is open) and a full re-render would yank the
       // form out from under the user, making their in-progress pick look
@@ -737,8 +749,8 @@
       var pDate = document.getElementById("f-date");
       var active = document.activeElement;
       preservedForm = {
-        amount: pAmt ? pAmt.value : "",
-        note: pNote ? pNote.value : "",
+        amount: pAmt && pAmt.value !== "" ? pAmt.value : draft.amount,
+        note: pNote && pNote.value !== "" ? pNote.value : draft.note,
         date: pDate && pDate.value ? pDate.value : todayISO(),
         focusedId: active && active.id,
         selectionStart: active && typeof active.selectionStart === "number" ? active.selectionStart : null,
@@ -892,6 +904,7 @@
       addEntry(amount, note, date).then(function () {
         document.getElementById("f-amount").value = "";
         document.getElementById("f-note").value = "";
+        draft.amount = ""; draft.note = "";
       });
     };
 

@@ -379,10 +379,10 @@
         method: "POST",
         body: JSON.stringify({ displayName: displayName.trim() })
       });
-      saveProfile({ householdCode: code, viewerId: body.viewerId, displayName: displayName.trim() });
+      saveProfile({ householdCode: code, viewerId: body.viewerId, displayName: body.displayName || displayName.trim() });
       busy = false;
       subscribeHousehold(code);
-      showToast("Joined " + body.household.name + "!");
+      showToast((body.rejoined ? "Welcome back to " : "Joined ") + body.household.name + "!");
     } catch (e) {
       busy = false;
       authError = e.message === "not_found"

@@ -156,10 +156,19 @@ app.post("/api/households/:code/join", async (req, res) => {
     if (!household) {
       return res.status(404).json({ error: "not_found" });
     }
+    // __rejoin_fix_v1__
+    const wanted = displayName.trim();
+    const existing = (household.members || []).find(
+      (m) => String(m.displayName || "").trim().toLowerCase() === wanted.toLowerCase()
+    );
+    if (existing) {
+      // Same name (any upper/lower case): sign back in as that member, no duplicate.
+      return res.json({ code, viewerId: existing.id, displayName: existing.displayName, rejoined: true, household });
+    }
     const viewerId = uid();
-    household.members.push({ id: viewerId, displayName: displayName.trim() });
+    household.members.push({ id: viewerId, displayName: wanted });
     await store.saveHousehold(household);
-    res.json({ code, viewerId, household });
+    res.json({ code, viewerId, displayName: wanted, rejoined: false, household });
   } catch (e) {
     console.error("POST /api/households/:code/join failed:", e);
     res.status(500).json({ error: "server_error" });

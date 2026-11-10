@@ -1,129 +1,96 @@
 #!/usr/bin/env node
 /*
- * Alkansya patcher: adds a "remove member" (✕) button to the
- * "Each member's contribution" table.
+ * Alkansya patcher: joining with a name that already exists in the household
+ * (case-insensitive) signs you back in as that member instead of creating a
+ * duplicate.
  *
- * Usage (from your project folder):
- *   node patch-remove-member.js                -> finds public/index.html or index.html
- *   node patch-remove-member.js path/to/index.html
+ * Patches TWO files: server.js and public/index.html
  *
- * Makes a backup (index.html.bak-member) first. Safe to run twice.
- * Works whether or not you already ran patch-index.js.
+ * Usage (from your project folder, next to server.js):
+ *   node patch-rejoin.js
+ *   node patch-rejoin.js path/to/server.js path/to/index.html
+ *
+ * Makes backups (*.bak-rejoin) first. Safe to run twice.
  */
 const fs = require("fs");
 const path = require("path");
 
-const arg = process.argv[2];
-const target = (arg ? [arg] : ["public/index.html", "index.html"]).find((p) => fs.existsSync(p));
-if (!target) {
-  console.error("Could not find index.html. Pass the path: node patch-remove-member.js path/to/index.html");
+const serverPath = process.argv[2] || (fs.existsSync("server.js") ? "server.js" : null);
+const htmlPath =
+  process.argv[3] || ["public/index.html", "index.html"].find((p) => fs.existsSync(p));
+
+if (!serverPath || !fs.existsSync(serverPath)) {
+  console.error("Could not find server.js. Run this from your project folder.");
+  process.exit(1);
+}
+if (!htmlPath || !fs.existsSync(htmlPath)) {
+  console.error("Could not find index.html (looked in public/index.html and index.html).");
   process.exit(1);
 }
 
-let src = fs.readFileSync(target, "utf8");
-const hadCRLF = src.includes("\r\n");
-if (hadCRLF) src = src.replace(/\r\n/g, "\n");
+function load(file) {
+  let text = fs.readFileSync(file, "utf8");
+  const crlf = text.includes("\r\n");
+  if (crlf) text = text.replace(/\r\n/g, "\n");
+  return { file, text, crlf, original: fs.readFileSync(file) };
+}
 
-if (src.includes("__remove_member_v1__")) {
-  console.log("Already patched: " + target);
+function replaceOnce(doc, label, find, replacement) {
+  const count = doc.text.split(find).length - 1;
+  if (count !== 1) {
+    console.error("FAILED on '" + label + "' in " + doc.file + ": expected 1 match, found " + count + ". Nothing was changed.");
+    process.exit(1);
+  }
+  doc.text = doc.text.replace(find, () => replacement);
+}
+
+const server = load(serverPath);
+const html = load(htmlPath);
+
+if (server.text.includes("__rejoin_fix_v1__") && html.text.includes("body.rejoined")) {
+  console.log("Already patched.");
   process.exit(0);
 }
 
-function replaceOnce(label, find, replacement) {
-  const count = src.split(find).length - 1;
-  if (count !== 1) {
-    console.error("FAILED on '" + label + "': expected 1 match, found " + count + ". Nothing was changed.");
-    process.exit(1);
-  }
-  src = src.replace(find, () => replacement);
+// ---- server.js: reuse existing member on join ----
+replaceOnce(
+  server,
+  "server join route",
+  `    const viewerId = uid();
+    household.members.push({ id: viewerId, displayName: displayName.trim() });
+    await store.saveHousehold(household);
+    res.json({ code, viewerId, household });`,
+  `    // __rejoin_fix_v1__
+    const wanted = displayName.trim();
+    const existing = (household.members || []).find(
+      (m) => String(m.displayName || "").trim().toLowerCase() === wanted.toLowerCase()
+    );
+    if (existing) {
+      // Same name (any upper/lower case): sign back in as that member, no duplicate.
+      return res.json({ code, viewerId: existing.id, displayName: existing.displayName, rejoined: true, household });
+    }
+    const viewerId = uid();
+    household.members.push({ id: viewerId, displayName: wanted });
+    await store.saveHousehold(household);
+    res.json({ code, viewerId, displayName: wanted, rejoined: false, household });`
+);
+
+// ---- index.html: use the existing member's name/id ----
+replaceOnce(
+  html,
+  "client saveProfile",
+  "saveProfile({ householdCode: code, viewerId: body.viewerId, displayName: displayName.trim() });",
+  "saveProfile({ householdCode: code, viewerId: body.viewerId, displayName: body.displayName || displayName.trim() });"
+);
+replaceOnce(
+  html,
+  "client toast",
+  'showToast("Joined " + body.household.name + "!");',
+  'showToast((body.rejoined ? "Welcome back to " : "Joined ") + body.household.name + "!");'
+);
+
+for (const doc of [server, html]) {
+  fs.writeFileSync(doc.file + ".bak-rejoin", doc.original);
+  fs.writeFileSync(doc.file, doc.crlf ? doc.text.replace(/\n/g, "\r\n") : doc.text, "utf8");
+  console.log("Patched " + path.resolve(doc.file) + "  (backup: " + doc.file + ".bak-rejoin)");
 }
-
-// 1) The removeMember function
-replaceOnce(
-  "add removeMember()",
-  "  async function deleteEntry(id, ownerViewerId) {\n",
-  `  // __remove_member_v1__
-  async function removeMember(id, name) {
-    if (!id || id === profile.viewerId) {
-      showToast("You can't remove yourself. Use Log out instead.");
-      return;
-    }
-    if (!window.confirm('Remove "' + name + '" from this household?')) return;
-    var fields = {
-      members: (household.members || []).filter(function (m) { return m.id !== id; })
-    };
-    var theirs = (household.entries || []).filter(function (en) { return en.viewerId === id; });
-    if (theirs.length && window.confirm(
-      name + " has " + theirs.length + " entries.\\n\\nOK = also delete their entries\\nCancel = keep their entries (totals stay the same)"
-    )) {
-      fields.entries = (household.entries || []).filter(function (en) { return en.viewerId !== id; });
-    }
-    try {
-      await patchHousehold(fields);
-      render();
-      showToast("Member removed.");
-    } catch (e) {
-      showToast("Couldn't remove — please try again.");
-    }
-  }
-
-  async function deleteEntry(id, ownerViewerId) {
-`
-);
-
-// 2) Keep each member's id in the breakdown
-replaceOnce(
-  "member id (members)",
-  "memberMap[m.id] = { displayName: m.displayName, income: 0, expense: 0 };",
-  "memberMap[m.id] = { id: m.id, displayName: m.displayName, income: 0, expense: 0 };"
-);
-replaceOnce(
-  "member id (entries)",
-  "memberMap[en.viewerId] = { displayName: en.displayName, income: 0, expense: 0 };",
-  "memberMap[en.viewerId] = { id: en.viewerId, displayName: en.displayName, income: 0, expense: 0 };"
-);
-
-// 3) Table header + remove button per row (never on your own row)
-replaceOnce(
-  "table header",
-  '<th style="text-align:right">Expenses</th></tr></thead>',
-  '<th style="text-align:right">Expenses</th><th></th></tr></thead>'
-);
-replaceOnce(
-  "table row button",
-  "+ peso(m.expense) + '</td></tr>';",
-  "+ peso(m.expense) + '</td><td style=\"text-align:right\">' + (m.id && m.id !== profile.viewerId ? '<button type=\"button\" class=\"btn-icon\" data-rmmember=\"' + esc(m.id) + '\" data-rmname=\"' + esc(m.displayName) + '\" title=\"Remove member\" aria-label=\"Remove member\">\\u2715</button>' : '') + '</td></tr>';"
-);
-
-// 4) Click handler
-replaceOnce(
-  "click handler",
-  '    var budgetForm = document.getElementById("budget-form");\n',
-  `    Array.prototype.forEach.call(root.querySelectorAll("[data-rmmember]"), function (btn) {
-      btn.onclick = function () {
-        removeMember(btn.getAttribute("data-rmmember"), btn.getAttribute("data-rmname"));
-      };
-    });
-
-    var budgetForm = document.getElementById("budget-form");
-`
-);
-
-// 5) If YOU get removed by someone else, send this device back to setup
-replaceOnce(
-  "removed-user check",
-  "      if (silent && isEditingForm()) return;\n",
-  `      if (profile && profile.viewerId && !(household.members || []).some(function (m) { return m.id === profile.viewerId; })) {
-        handleLogout();
-        showToast("You were removed from this household.");
-        return;
-      }
-      if (silent && isEditingForm()) return;
-`
-);
-
-fs.writeFileSync(target + ".bak-member", fs.readFileSync(target));
-if (hadCRLF) src = src.replace(/\n/g, "\r\n");
-fs.writeFileSync(target, src, "utf8");
-console.log("Patched " + path.resolve(target));
-console.log("Backup saved as " + target + ".bak-member");

@@ -195,12 +195,13 @@ app.patch("/api/households/:code", async (req, res) => {
     const household = await store.getHousehold(code);
     if (!household) return res.status(404).json({ error: "not_found" });
 
-    const { entries, budgets, members, recurringBills, settings } = req.body || {};
+    const { entries, budgets, members, recurringBills, settings, customCategories } = req.body || {};
     if (entries !== undefined) household.entries = entries;
     if (budgets !== undefined) household.budgets = budgets;
     if (members !== undefined) household.members = members;
     if (recurringBills !== undefined) household.recurringBills = recurringBills;
     if (settings !== undefined) household.settings = settings;
+    if (customCategories !== undefined) household.customCategories = customCategories;
 
     await store.saveHousehold(household);
     res.json({ household });
